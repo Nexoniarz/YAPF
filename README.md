@@ -28,5 +28,17 @@ The project is designed to be cross-compiled using the **Zig** toolchain for max
 
 ```bash
 # Run the build script to generate static and shared libraries
-./build.sh | UNIX
+./build.sh | UNIX (macOS / Linux)
 ./build.bat | WINDOWS
+```
+
+### Technical Specification
+PIKTURE uses a custom byte-stream protocol:
+- 0x00 - 0x3F: INDEX - Fetch pixel from a 64-color LRU cache.
+- 0x40 - 0x7F: DIFF - Apply small RGB deltas.
+- 0x80 - 0xBF: LUMA - Apply green-relative color deltas.
+- 0xC0 - 0xFD: RUN - Repeat previous pixel.
+- 0xFE: RGB - Full 24-bit color change.
+- 0xFF: RGBA - Full 32-bit color change.
+
+### MIT LICENSE
