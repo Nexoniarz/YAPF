@@ -32,8 +32,8 @@ The project is designed to be cross-compiled using the **Zig** toolchain for max
 ./build.bat | WINDOWS
 ```
 
-### Technical Specification
-PIKTURE uses a custom byte-stream protocol:
+## Technical Specification
+### PIKTURE uses a custom byte-stream protocol:
 - 0x00 - 0x3F: INDEX - Fetch pixel from a 64-color LRU cache.
 - 0x40 - 0x7F: DIFF - Apply small RGB deltas.
 - 0x80 - 0xBF: LUMA - Apply green-relative color deltas.
