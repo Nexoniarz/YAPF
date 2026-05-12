@@ -13,12 +13,13 @@ Standard formats like PNG are often bottlenecked by heavy decompression algorith
 - **Smart Alpha:** Automatically optimizes storage when transparency is not used.
 
 ## Performance Comparison
-Benchmark results for a 5K professional image (sample 5120x3840):
+Benchmark results for a 5K professional image (sample 5120x2880):
 
-| Format | File Size | Difference | Decoding Complexity |
-| :--- | :--- | :--- | :--- |
-| **PNG** | 16.2 MB | Baseline | High (CPU Intensive) |
-| **PIKTURE (PIK)** | **10.1 MB** | **- 6.1 MB (37%)** | **Minimal (Linear Stream)** |
+- PIK Load Time:  0.111735 seconds
+- PIK Dimensions: 5120x2880
+- ------------------------------------
+- PNG Load Time:  0.193990 seconds
+- PNG Dimensions: 5120x2880
 
 ## Implementation
 The core library consists of only two files: `pikture.h` and `pikture.c`.
