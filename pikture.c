@@ -1,7 +1,7 @@
 /*
 pikture.c
 Native PIKTURE format encoder and decoder library.
-Version: 100
+Version: 101
 License: MIT
 Made by: Nexoniarz
 */
@@ -11,22 +11,37 @@ Made by: Nexoniarz
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef PIKT_USE_SIMD
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#endif
+#endif
+
+#ifdef PIKT_USE_THREADS
+#include <omp.h>
+#endif
+
 #define PIKT_MAGIC "PIK!"
-#define PIKT_VERSION 5
+#define PIKT_VERSION 101
 #define PIKT_HASH(r, g, b, a) (((r) * 3 + (g) * 5 + (b) * 7 + (a) * 11) % 64)
 
 typedef struct {
     uint8_t r, g, b, a;
 } pikt_pixel;
 
-/* Reads a 16-bit unsigned integer in Big-Endian format */
+static uint8_t system_is_be() {
+    uint16_t x = 1;
+    return *((uint8_t*)&x) == 0;
+}
+
 static uint16_t read_u16_be(FILE* f) {
     uint8_t bytes[2];
     fread(bytes, 1, 2, f);
     return (bytes[0] << 8) | bytes[1];
 }
 
-/* Writes a 16-bit unsigned integer in Big-Endian format */
 static void write_u16_be(FILE* f, uint16_t value) {
     uint8_t bytes[2] = { (value >> 8) & 0xFF, value & 0xFF };
     fwrite(bytes, 1, 2, f);
@@ -63,6 +78,8 @@ pikture_t* pikture_load(const char* filename) {
     fread(&depth, 1, 1, f);
     img->channels = 4;
 
+    fread(&img->endianness, 1, 1, f);
+
     size_t data_size = (size_t)img->width * img->height * 4;
     img->pixels = (uint8_t*)malloc(data_size);
     if (!img->pixels) {
@@ -75,6 +92,10 @@ pikture_t* pikture_load(const char* filename) {
     uint8_t r = 0, g = 0, b = 0, a = 255;
     
     size_t ptr = 0;
+
+#ifdef PIKT_USE_THREADS
+#pragma omp parallel
+#endif
     while (ptr < data_size) {
         int b0 = fgetc(f);
         if (b0 == EOF) break;
@@ -147,6 +168,9 @@ int pikture_save(const char* filename, const pikture_t* img) {
     uint8_t depth = 32;
     fwrite(&depth, 1, 1, f);
 
+    uint8_t current_endianness = system_is_be();
+    fwrite(&current_endianness, 1, 1, f);
+
     pikt_pixel index[64] = {0};
     uint8_t prev_r = 0, prev_g = 0, prev_b = 0, prev_a = 255;
     int run = 0;
@@ -154,6 +178,9 @@ int pikture_save(const char* filename, const pikture_t* img) {
     size_t total_pixels = (size_t)img->width * img->height;
     size_t px_idx = 0;
 
+#ifdef PIKT_USE_THREADS
+#pragma omp parallel
+#endif
     while (px_idx < total_pixels * 4) {
         uint8_t r = img->pixels[px_idx++];
         uint8_t g = img->pixels[px_idx++];
