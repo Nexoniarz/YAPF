@@ -24,7 +24,7 @@ Benchmark results for loading a 5K professional image (Sample dimensions: 5120x2
 | **PIK** | **0.111735 sec** | 5120x2880 |
 | PNG | 0.193990 sec | 5120x2880 |
 
-*PIKTURE decodes nearly 2x faster than standard PNG implementations on the same hardware.*
+*PIKTURE decodes nearly 2x faster than standard PNG implementations on the same hardware without SIMD or OpenMP.*
 
 ---
 
