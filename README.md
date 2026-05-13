@@ -101,7 +101,7 @@ PIKTURE is a binary format. All multi-byte integers in the header are stored in 
 | Offset | Size | Type | Description |
 | --- | --- | --- | --- |
 | `0x00` | 4 bytes | `char[4]` | Magic bytes: `"PIK!"` |
-| `0x04` | 1 byte | `uint8_t` | Version number (Currently `5`) |
+| `0x04` | 1 byte | `uint8_t` | Version number (Currently `101`) |
 | `0x05` | 2 bytes | `uint16_t` | Image Width |
 | `0x07` | 2 bytes | `uint16_t` | Image Height |
 | `0x09` | 1 byte | `uint8_t` | Bit Depth (Currently `32` for RGBA) |
