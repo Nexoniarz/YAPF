@@ -123,7 +123,3 @@ Immediately following the header is the compressed pixel data payload. PIKTURE u
 ## 📜 License
 
 This project is licensed under the **MIT License**. Free to use, modify, and distribute for personal and commercial purposes.
-
-```
-
-```
