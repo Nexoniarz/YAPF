@@ -7,12 +7,12 @@ PIKTURE is a high-performance, lossless image format designed for systems where 
 Standard formats like PNG are often bottlenecked by heavy decompression algorithms (DEFLATE/ZIP). PIKTURE replaces complex bit-shuffling with a hardware-friendly **INDEX + Delta** encoding. This allows the CPU to stream pixels directly to memory with minimal overhead, acting closer to a memory copy operation than a math-heavy decompression.
 
 ### ✨ Key Features
-- **Lossless:** 100% bit-perfect reproduction of RGBA data.
+- **Lossless:** 100% bit-perfect reproduction of image data.
+- **Dynamic Color Depth:** Full support for 1, 2, 4, 8, 16, 24, and 32-bit depths, natively handling Grayscale, Grayscale+Alpha, RGB, and RGBA formats without bloat.
 - **Ultra-Fast:** Near-memcpy decoding speeds utilizing cache-friendly algorithms.
 - **Hardware Acceleration:** Optional SIMD (AVX/NEON) and OpenMP multithreading support.
 - **Small Footprint:** Two-file C library (`.c` / `.h`) with zero external dependencies.
-- **Endian-Aware:** Cross-architecture compatibility (Little-Endian / Big-Endian).
-- **Smart Alpha:** Automatically optimizes storage when transparency is not used.
+- **Strict Endian-Awareness:** Active cross-architecture compatibility (Little-Endian / Big-Endian) built directly into the parser.
 
 ---
 
@@ -49,7 +49,7 @@ int main() {
         return 1;
     }
 
-    printf("Loaded %dx%d image.\n", img->width, img->height);
+    printf("Loaded %dx%d image with %d channels.\n", img->width, img->height, img->channels);
 
     // Save an image
     pikture_save("output.pik", img);
@@ -94,7 +94,7 @@ gcc -O3 -DPIKT_USE_SIMD -DPIKT_USE_THREADS -fopenmp main.c pikture.c -o myapp
 
 ## 🔬 Technical Specification
 
-PIKTURE is a binary format. All multi-byte integers in the header are stored in **Big-Endian** format.
+PIKTURE is a binary format. The 11-byte header is dynamically interpreted based on the Endianness flag to ensure universal portability.
 
 ### 1. File Header (11 Bytes)
 
@@ -104,8 +104,8 @@ PIKTURE is a binary format. All multi-byte integers in the header are stored in 
 | `0x04` | 1 byte | `uint8_t` | Version number (Currently `101`) |
 | `0x05` | 2 bytes | `uint16_t` | Image Width |
 | `0x07` | 2 bytes | `uint16_t` | Image Height |
-| `0x09` | 1 byte | `uint8_t` | Bit Depth (Currently `32` for RGBA) |
-| `0x0A` | 1 byte | `uint8_t` | Endianness flag (`0` = Little, `1` = Big) |
+| `0x09` | 1 byte | `uint8_t` | Bit Depth (Supports 1/2/4/8/16/24/32-bit depths) |
+| `0x0A` | 1 byte | `uint8_t` | Endianness flag (`0` = Little, `1` = Big). Dictates Width/Height reading logic. |
 
 ### 2. Byte-Stream Protocol
 
@@ -118,10 +118,10 @@ Immediately following the header is the compressed pixel data payload. PIKTURE u
 * `0xFE` (**RGB**): Full 24-bit color change (Alpha remains unchanged). Followed by 3 bytes (R, G, B).
 * `0xFF` (**RGBA**): Full 32-bit color change. Followed by 4 bytes (R, G, B, A).
 
+*Note: For depths lower than 32-bit (e.g., Grayscale or 24-bit RGB), the decoder dynamically maps the byte-stream to the correct channel layout.*
+
 ---
 
 ## 📜 License
 
 This project is licensed under the **MIT License**. Free to use, modify, and distribute for personal and commercial purposes.
-
-![Pikture Icon](other/Pikture.svg)
