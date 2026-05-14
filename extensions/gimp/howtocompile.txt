@@ -1,6 +1,6 @@
-To compile you need GIMP(ofc lol) and pikture.c which you can find in the root folder of the Pikture Project.
+To compile the extension, you need GIMP(ofc lol) and pikture.c, which is located in the root directory.
 
-second is to just open terminal/cmd and type this
-gimptool --install pikture-gimp.c
+second is to just open the terminal/cmd and type this
+$ gimptool --install pikture-gimp.c
 
 and that's it, it's not so hard.
