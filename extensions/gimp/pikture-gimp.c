@@ -49,7 +49,7 @@ static GimpProcedure * pikture_plugin_create_procedure (GimpPlugIn *plug_in, con
     } else if (g_strcmp0 (name, SAVE_PROC) == 0) {
         procedure = gimp_export_procedure_new (plug_in, name, GIMP_PDB_PROC_TYPE_PLUGIN, TRUE, (GimpRunExportFunc) pikture_save_run, NULL, NULL);
         
-        gimp_procedure_set_image_types (procedure, "RGB, RGBA");
+        gimp_procedure_set_image_types (procedure, "RGB, RGBA, GRAY, GRAYA");
         
         gimp_procedure_set_menu_label (procedure, "PIKTURE image");
         gimp_procedure_set_documentation (procedure, "Exports a PIKTURE image", "Exports a PIKTURE image", NULL);
@@ -73,12 +73,30 @@ static GimpValueArray * pikture_load_run (GimpProcedure *procedure, GimpRunMode 
         return gimp_procedure_new_return_values (procedure, GIMP_PDB_EXECUTION_ERROR, error);
     }
 
-    GimpImage *image = gimp_image_new (pik->width, pik->height, GIMP_RGB);
-    GimpLayer *layer = gimp_layer_new (image, "Background", pik->width, pik->height, GIMP_RGBA_IMAGE, 100.0, gimp_image_get_default_new_layer_mode (image));
+    GimpImageBaseType base_type = GIMP_RGB;
+    GimpImageType layer_type = GIMP_RGBA_IMAGE;
+    const gchar* b_format = "R'G'B'A u8";
+
+    if (pik->channels == 1) {
+        base_type = GIMP_GRAY;
+        layer_type = GIMP_GRAY_IMAGE;
+        b_format = "Y' u8";
+    } else if (pik->channels == 2) {
+        base_type = GIMP_GRAY;
+        layer_type = GIMP_GRAYA_IMAGE;
+        b_format = "Y'A u8";
+    } else if (pik->channels == 3) {
+        base_type = GIMP_RGB;
+        layer_type = GIMP_RGB_IMAGE;
+        b_format = "R'G'B' u8";
+    }
+
+    GimpImage *image = gimp_image_new (pik->width, pik->height, base_type);
+    GimpLayer *layer = gimp_layer_new (image, "Background", pik->width, pik->height, layer_type, 100.0, gimp_image_get_default_new_layer_mode (image));
     gimp_image_insert_layer (image, layer, NULL, 0);
 
     GeglBuffer *buffer = gimp_drawable_get_buffer (GIMP_DRAWABLE (layer));
-    gegl_buffer_set (buffer, GEGL_RECTANGLE (0, 0, pik->width, pik->height), 0, babl_format ("R'G'B'A u8"), pik->pixels, GEGL_AUTO_ROWSTRIDE);
+    gegl_buffer_set (buffer, GEGL_RECTANGLE (0, 0, pik->width, pik->height), 0, babl_format (b_format), pik->pixels, GEGL_AUTO_ROWSTRIDE);
     g_object_unref (buffer);
 
     pikture_free(pik);
@@ -105,11 +123,34 @@ static GimpValueArray * pikture_save_run (GimpProcedure *procedure, GimpRunMode 
     pikture_t pik;
     pik.width = gimp_drawable_get_width (drawable);
     pik.height = gimp_drawable_get_height (drawable);
-    pik.channels = 4;
-    pik.pixels = malloc (pik.width * pik.height * 4);
+
+    gboolean has_alpha = gimp_drawable_has_alpha (drawable);
+    gboolean is_gray = gimp_drawable_is_gray (drawable);
+    const gchar* b_format = "R'G'B'A u8";
+
+    if (is_gray) {
+        if (has_alpha) {
+            pik.channels = 2;
+            b_format = "Y'A u8";
+        } else {
+            pik.channels = 1;
+            b_format = "Y' u8";
+        }
+    } else {
+        if (has_alpha) {
+            pik.channels = 4;
+            b_format = "R'G'B'A u8";
+        } else {
+            pik.channels = 3;
+            b_format = "R'G'B' u8";
+        }
+    }
+
+    pik.depth = pik.channels * 8;
+    pik.pixels = malloc (pik.width * pik.height * pik.channels);
 
     GeglBuffer *buffer = gimp_drawable_get_buffer (drawable);
-    gegl_buffer_get (buffer, GEGL_RECTANGLE (0, 0, pik.width, pik.height), 1.0, babl_format ("R'G'B'A u8"), pik.pixels, GEGL_AUTO_ROWSTRIDE, GEGL_ABYSS_NONE);
+    gegl_buffer_get (buffer, GEGL_RECTANGLE (0, 0, pik.width, pik.height), 1.0, babl_format (b_format), pik.pixels, GEGL_AUTO_ROWSTRIDE, GEGL_ABYSS_NONE);
     g_object_unref (buffer);
 
     int result = pikture_save(filename, &pik);
