@@ -1,1 +1,4 @@
+To compile you need GIMP(ofc lol) and pikture.c witch you can find in the root folder of the pikture.
 
+second is to just open terminal/cmd and type this
+gimptool --install pikture-gimp.c
