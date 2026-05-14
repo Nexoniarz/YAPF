@@ -1,3 +1,4 @@
+![Pikture Icon](Pikture.svg)
 # PIKTURE (PIK)
 **Fast. Small. Easy.**
 
