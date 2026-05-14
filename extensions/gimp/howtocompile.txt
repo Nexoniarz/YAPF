@@ -2,3 +2,5 @@ To compile you need GIMP(ofc lol) and pikture.c witch you can find in the root f
 
 second is to just open terminal/cmd and type this
 gimptool --install pikture-gimp.c
+
+and that's it, it's not so hard.
