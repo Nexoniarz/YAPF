@@ -36,31 +36,22 @@ static uint8_t system_is_be() {
     return *((uint8_t*)&x) == 0;
 }
 
-static uint16_t read_u16_be(FILE* f) {
-    uint8_t bytes[2];
-    fread(bytes, 1, 2, f);
-    return (bytes[0] << 8) | bytes[1];
-}
-
-static void write_u16_be(FILE* f, uint16_t value) {
-    uint8_t bytes[2] = { (value >> 8) & 0xFF, value & 0xFF };
-    fwrite(bytes, 1, 2, f);
-}
-
 pikture_t* pikture_load(const char* filename) {
     FILE* f = fopen(filename, "rb");
     if (!f) return NULL;
 
-    char magic[4];
-    fread(magic, 1, 4, f);
-    if (memcmp(magic, PIKT_MAGIC, 4) != 0) {
+    uint8_t header[11];
+    if (fread(header, 1, 11, f) != 11) {
         fclose(f);
         return NULL;
     }
 
-    uint8_t version;
-    fread(&version, 1, 1, f);
-    if (version != PIKT_VERSION) {
+    if (memcmp(header, PIKT_MAGIC, 4) != 0) {
+        fclose(f);
+        return NULL;
+    }
+
+    if (header[4] != PIKT_VERSION) {
         fclose(f);
         return NULL;
     }
@@ -71,16 +62,21 @@ pikture_t* pikture_load(const char* filename) {
         return NULL;
     }
 
-    img->width = read_u16_be(f);
-    img->height = read_u16_be(f);
-    
-    uint8_t depth;
-    fread(&depth, 1, 1, f);
-    img->channels = 4;
+    img->endianness = header[10];
 
-    fread(&img->endianness, 1, 1, f);
+    if (img->endianness) {
+        img->width = (header[5] << 8) | header[6];
+        img->height = (header[7] << 8) | header[8];
+    } else {
+        img->width = (header[6] << 8) | header[5];
+        img->height = (header[8] << 8) | header[7];
+    }
 
-    size_t data_size = (size_t)img->width * img->height * 4;
+    img->depth = header[9];
+    img->channels = (img->depth + 7) / 8;
+    if (img->channels == 0) img->channels = 1;
+
+    size_t data_size = (size_t)img->width * img->height * img->channels;
     img->pixels = (uint8_t*)malloc(data_size);
     if (!img->pixels) {
         free(img);
@@ -120,6 +116,7 @@ pikture_t* pikture_load(const char* filename) {
                 b = (uint8_t)(b + (b0 & 0x03) - 2);
             } else if (match == 0x80) {
                 int b1 = fgetc(f);
+                if (b1 == EOF) break;
                 int8_t dg = (b0 & 0x3F) - 32;
                 r = (uint8_t)(r + dg + ((b1 >> 4) & 0x0F) - 8);
                 g = (uint8_t)(g + dg);
@@ -128,9 +125,9 @@ pikture_t* pikture_load(const char* filename) {
                 int run = (b0 & 0x3F) + 1;
                 for (int i = 0; i < run && ptr < data_size; i++) {
                     img->pixels[ptr++] = r;
-                    img->pixels[ptr++] = g;
-                    img->pixels[ptr++] = b;
-                    img->pixels[ptr++] = a;
+                    if (img->channels >= 2) img->pixels[ptr++] = (img->channels == 2) ? a : g;
+                    if (img->channels >= 3) img->pixels[ptr++] = b;
+                    if (img->channels >= 4) img->pixels[ptr++] = a;
                 }
                 continue;
             }
@@ -144,9 +141,9 @@ pikture_t* pikture_load(const char* filename) {
 
         if (ptr < data_size) {
             img->pixels[ptr++] = r;
-            img->pixels[ptr++] = g;
-            img->pixels[ptr++] = b;
-            img->pixels[ptr++] = a;
+            if (img->channels >= 2) img->pixels[ptr++] = (img->channels == 2) ? a : g;
+            if (img->channels >= 3) img->pixels[ptr++] = b;
+            if (img->channels >= 4) img->pixels[ptr++] = a;
         }
     }
 
@@ -160,16 +157,27 @@ int pikture_save(const char* filename, const pikture_t* img) {
     FILE* f = fopen(filename, "wb");
     if (!f) return 0;
 
-    fwrite(PIKT_MAGIC, 1, 4, f);
-    uint8_t version = PIKT_VERSION;
-    fwrite(&version, 1, 1, f);
-    write_u16_be(f, img->width);
-    write_u16_be(f, img->height);
-    uint8_t depth = 32;
-    fwrite(&depth, 1, 1, f);
+    uint8_t header[11];
+    memcpy(header, PIKT_MAGIC, 4);
+    header[4] = PIKT_VERSION;
 
     uint8_t current_endianness = system_is_be();
-    fwrite(&current_endianness, 1, 1, f);
+    if (current_endianness) {
+        header[5] = (img->width >> 8) & 0xFF;
+        header[6] = img->width & 0xFF;
+        header[7] = (img->height >> 8) & 0xFF;
+        header[8] = img->height & 0xFF;
+    } else {
+        header[5] = img->width & 0xFF;
+        header[6] = (img->width >> 8) & 0xFF;
+        header[7] = img->height & 0xFF;
+        header[8] = (img->height >> 8) & 0xFF;
+    }
+
+    header[9] = img->depth ? img->depth : (img->channels * 8);
+    header[10] = current_endianness;
+
+    fwrite(header, 1, 11, f);
 
     pikt_pixel index[64] = {0};
     uint8_t prev_r = 0, prev_g = 0, prev_b = 0, prev_a = 255;
@@ -181,11 +189,25 @@ int pikture_save(const char* filename, const pikture_t* img) {
 #ifdef PIKT_USE_THREADS
 #pragma omp parallel
 #endif
-    while (px_idx < total_pixels * 4) {
-        uint8_t r = img->pixels[px_idx++];
-        uint8_t g = img->pixels[px_idx++];
-        uint8_t b = img->pixels[px_idx++];
-        uint8_t a = img->pixels[px_idx++];
+    while (px_idx < total_pixels * img->channels) {
+        uint8_t r = 0, g = 0, b = 0, a = 255;
+        
+        r = img->pixels[px_idx++];
+        if (img->channels == 4) {
+            g = img->pixels[px_idx++];
+            b = img->pixels[px_idx++];
+            a = img->pixels[px_idx++];
+        } else if (img->channels == 3) {
+            g = img->pixels[px_idx++];
+            b = img->pixels[px_idx++];
+        } else if (img->channels == 2) {
+            g = r;
+            b = r;
+            a = img->pixels[px_idx++];
+        } else if (img->channels == 1) {
+            g = r;
+            b = r;
+        }
 
         if (r == prev_r && g == prev_g && b == prev_b && a == prev_a) {
             run++;
