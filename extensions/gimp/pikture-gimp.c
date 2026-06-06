@@ -1,3 +1,23 @@
+/*
+ * pikture.c
+ * PIKTURE format plugin for GIMP.
+ * This plugin is designed to interface with GIMP (licensed under GPLv3). This plugin itself is an independent work and is provided under the Apache License 2.0. Users are free to use, modify, and distribute this plugin independently of GIMP's licensing terms.
+ * Version: 101
+ * * Copyright 2026 Nexoniarz
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <libgimp/gimp.h>
 #include "pikture.c"
 #include <stdlib.h>
