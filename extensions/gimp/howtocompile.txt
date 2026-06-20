@@ -1,6 +1,40 @@
-To compile the extension, you need GIMP(ofc lol) and pikture.c, which is located in the root directory.
+YAPF GIMP Plugin — Build Instructions
+======================================
 
-second is to just open the terminal/cmd and type this
-$ gimptool --install pikture-gimp.c
+Requirements
+------------
+  - GIMP 3.0 or later (with development headers)
+  - gimptool (included with GIMP 3 dev packages)
+  - yapf.c and yapf.h must be in the SAME directory as yapf-gimp.c
+    (the plugin embeds the codec via a direct #include)
 
-and that's it, it's not so hard.
+  On Arch/Manjaro:    sudo pacman -S gimp
+  On Debian/Ubuntu:   sudo apt install gimp libgmp3-dev
+  On Fedora:          sudo dnf install gimp gimp-devel
+
+Installation (automatic)
+-------------------------
+Open a terminal in this directory and run:
+
+    $ gimptool --install yapf-gimp.c
+
+This compiles the plugin and installs it into your GIMP plug-ins folder
+automatically.  Restart GIMP and .yapf files will appear in the "Open" and
+"Export As" dialogs under "YAPF image (*.yapf)".
+
+Manual compilation
+------------------
+    $ gcc $(gimptool --cflags) -O2 yapf-gimp.c \
+          $(gimptool --libs) -o yapf-gimp
+    $ install -Dm755 yapf-gimp \
+          ~/.config/GIMP/3.(your version here)/plug-ins/yapf-gimp/yapf-gimp
+
+Notes
+-----
+  - The plugin registers two procedures: file-yapf-load and file-yapf-save.
+  - Supported colour modes: Gray, Gray+Alpha, RGB, RGBA.
+  - The MIME type is image/x-yapf and the file extension is .yapf.
+  - RGB and RGBA images are saved with the sRGB GPU hint (YAPF_FLAG_SRGB)
+    because GIMP's native 8-bit buffers are always gamma-corrected sRGB.
+  - Mip levels are NOT generated on export — GIMP does not expose them.
+    Use the YAPF C API directly if you need a mip chain.
