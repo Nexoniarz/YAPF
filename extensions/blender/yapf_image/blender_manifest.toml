@@ -1,0 +1,16 @@
+schema_version = "1.0.0"
+
+id = "yapf_image"
+version = "1.0.0"
+name = "YAPF Image Format"
+tagline = "Import and export YAPF lossless images"
+maintainer = "Nexoniarz"
+type = "add-on"
+website = "https://github.com/Nexoniarz/YAPF"
+tags = ["Import-Export"]
+
+blender_version_min = "4.2.0"
+license = ["SPDX:Apache-2.0"]
+
+[permissions]
+files = "Read and write .yapf image files"

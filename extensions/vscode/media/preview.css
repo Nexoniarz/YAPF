@@ -1,0 +1,26 @@
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex; flex-direction: column;
+  background: var(--vscode-editor-background, #1e1e1e);
+  color: var(--vscode-foreground, #ccc);
+  font: 12px var(--vscode-font-family, system-ui, sans-serif);
+}
+#bar {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 6px 12px; border-bottom: 1px solid var(--vscode-panel-border, #333);
+}
+#bar select {
+  background: var(--vscode-dropdown-background, #3c3c3c);
+  color: var(--vscode-dropdown-foreground, #ccc);
+  border: 1px solid var(--vscode-dropdown-border, #555);
+}
+#stage { flex: 1; overflow: auto; display: grid; place-items: center; padding: 16px; cursor: zoom-in; }
+body:not(.fit) #stage { cursor: zoom-out; }
+canvas {
+  background-color: #fff;
+  background-image: conic-gradient(#ccc 25%, #fff 0 50%, #ccc 0 75%, #fff 0);
+  background-size: 16px 16px;
+  box-shadow: 0 0 0 1px var(--vscode-panel-border, #333);
+}
+canvas.pixelated { image-rendering: pixelated; }
+#error { padding: 16px; color: var(--vscode-errorForeground, #f48771); }

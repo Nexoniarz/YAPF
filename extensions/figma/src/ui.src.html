@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 12px Inter, system-ui, sans-serif; margin: 0; padding: 14px;
+         color: var(--figma-color-text, #333); background: var(--figma-color-bg, #fff); }
+  h2 { font-size: 13px; margin: 0 0 10px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .tabs button { flex: 1; }
+  button { font: inherit; padding: 7px 10px; border-radius: 6px; cursor: pointer;
+           border: 1px solid var(--figma-color-border, #ccc);
+           background: var(--figma-color-bg-secondary, #f5f5f5); color: inherit; }
+  button.primary, .tabs button.on { background: var(--figma-color-bg-brand, #0d99ff);
+           color: var(--figma-color-text-onbrand, #fff); border-color: transparent; }
+  #drop { border: 2px dashed var(--figma-color-border, #ccc); border-radius: 8px; padding: 28px 10px;
+          text-align: center; cursor: pointer; color: var(--figma-color-text-secondary, #777); }
+  #drop.hover { border-color: var(--figma-color-border-brand, #0d99ff); }
+  #status { margin-top: 10px; min-height: 32px; color: var(--figma-color-text-secondary, #777);
+            white-space: pre-line; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+  select { font: inherit; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="tabs">
+  <button id="tab-import">Import</button>
+  <button id="tab-export">Export</button>
+</div>
+
+<section id="import">
+  <h2>Import YAPF images</h2>
+  <div id="drop">Drop .yapf files here<br>or click to choose</div>
+  <input id="file" type="file" accept=".yapf" multiple hidden>
+</section>
+
+<section id="export" hidden>
+  <h2>Export selection as YAPF</h2>
+  <div id="sel">Nothing selected</div>
+  <div class="row">Scale
+    <select id="scale"><option>1</option><option>2</option><option>4</option></select>
+  </div>
+  <button id="go" class="primary">Export</button>
+</section>
+
+<div id="status"></div>
+
+<script>/*__YAPF_JS__*/</script>
+<script>/*__PNG_JS__*/</script>
+<script>
+const $ = (id) => document.getElementById(id);
+const post = (m) => parent.postMessage({ pluginMessage: m }, '*');
+const status = (t) => { $('status').textContent = t; };
+
+function tab(name) {
+  $('import').hidden = name !== 'import';
+  $('export').hidden = name !== 'export';
+  $('tab-import').classList.toggle('on', name === 'import');
+  $('tab-export').classList.toggle('on', name === 'export');
+  status('');
+}
+$('tab-import').onclick = () => tab('import');
+$('tab-export').onclick = () => tab('export');
+
+/* Import: .yapf → pixels → exact PNG → Figma image */
+async function importFiles(files) {
+  const images = [];
+  for (const f of files) {
+    try {
+      const img = YAPF.decode(new Uint8Array(await f.arrayBuffer()));
+      const png = await PNG.encode(img.pixels, img.width, img.height, img.channels);
+      images.push({ name: f.name.replace(/\.yapf$/i, ''), width: img.width, height: img.height, png });
+      status('Decoded ' + f.name + ' (' + img.width + '×' + img.height + ')');
+    } catch (e) {
+      status(f.name + ': ' + e.message);
+    }
+  }
+  if (images.length) post({ type: 'import', images });
+}
+$('drop').onclick = () => $('file').click();
+$('file').onchange = (e) => importFiles([...e.target.files]);
+$('drop').ondragover = (e) => { e.preventDefault(); $('drop').classList.add('hover'); };
+$('drop').ondragleave = () => $('drop').classList.remove('hover');
+$('drop').ondrop = (e) => { e.preventDefault(); $('drop').classList.remove('hover'); importFiles([...e.dataTransfer.files]); };
+
+/* Export: Figma PNG → exact pixels → .yapf download */
+$('go').onclick = () => { status('Exporting…'); post({ type: 'export', scale: +$('scale').value }); };
+
+async function exported(name, pngBytes) {
+  let img = await PNG.decode(pngBytes);
+  let { pixels, channels } = img;
+  if (channels === 4) {                                   // drop alpha when fully opaque
+    let opaque = true;
+    for (let i = 3; i < pixels.length && opaque; i += 4) opaque = pixels[i] === 255;
+    if (opaque) {
+      const rgb = new Uint8Array(img.width * img.height * 3);
+      for (let i = 0, j = 0; i < pixels.length; i += 4, j += 3) rgb.set(pixels.subarray(i, i + 3), j);
+      pixels = rgb; channels = 3;
+    }
+  }
+  const file = YAPF.encode({ width: img.width, height: img.height, channels, pixels,
+                             flags: YAPF.FLAG.SRGB,
+                             gpuFormat: channels === 4 ? YAPF.GPU.SRGB8_A8 : YAPF.GPU.SRGB8 });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([file], { type: 'image/x-yapf' }));
+  a.download = name.replace(/[\\/:*?"<>|]/g, '_') + '.yapf';
+  document.body.appendChild(a); a.click(); a.remove();
+  status('Saved ' + a.download + '\n' + img.width + '×' + img.height + ', ' +
+         (file.length / 1024).toFixed(1) + ' KB (' +
+         (100 * file.length / (img.width * img.height * channels)).toFixed(1) + '% of raw)');
+}
+
+onmessage = (e) => {
+  const m = e.data.pluginMessage;
+  if (!m) return;
+  if (m.type === 'mode') tab(m.mode === 'export' ? 'export' : 'import');
+  if (m.type === 'selection')
+    $('sel').textContent = m.names.length ? 'Selected: ' + m.names.join(', ') : 'Nothing selected';
+  if (m.type === 'exported') exported(m.name, m.png).catch((err) => status(m.name + ': ' + err.message));
+};
+</script>
+</body>
+</html>

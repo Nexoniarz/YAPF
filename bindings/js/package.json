@@ -1,0 +1,11 @@
+{
+  "name": "yapf-image",
+  "version": "1.0.0",
+  "description": "YAPF v1 lossless image format: encoder and decoder in plain JavaScript, no dependencies",
+  "main": "yapf.js",
+  "files": ["yapf.js", "README.md"],
+  "scripts": { "test": "node test.js" },
+  "keywords": ["image", "codec", "lossless", "yapf", "texture"],
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "https://github.com/Nexoniarz/YAPF.git", "directory": "bindings/js" }
+}

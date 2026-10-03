@@ -8,7 +8,7 @@
 #
 #  Options:
 #    --debug        Debug build: no optimisation, full symbols
-#    --simd         Enable SIMD paths (-DYAPF_USE_SIMD)
+#    --no-simd      Plain C only (SIMD is on by default, picked at run time)
 #    --static-only  Build only static libraries
 #    --shared-only  Build only shared libraries
 #    --help         Show this message
@@ -40,14 +40,15 @@ step()  { echo; echo "${BLD}──── $* ────${RST}"; }
 
 # ── Option parsing ───────────────────────────────────────────────────
 OPT_DEBUG=0
-OPT_SIMD=0
+OPT_NOSIMD=0
 OPT_STATIC_ONLY=0
 OPT_SHARED_ONLY=0
 
 for arg in "$@"; do
     case "$arg" in
         --debug)       OPT_DEBUG=1 ;;
-        --simd)        OPT_SIMD=1 ;;
+        --no-simd)     OPT_NOSIMD=1 ;;
+        --simd)        ;;   # SIMD is the default now; kept for old scripts
         --static-only) OPT_STATIC_ONLY=1 ;;
         --shared-only) OPT_SHARED_ONLY=1 ;;
         --help)
@@ -89,7 +90,7 @@ fi
 [[ -n "$STRIP" ]] && info "Strip    : $STRIP"
 
 # ── Compiler flags ───────────────────────────────────────────────────
-CFLAGS="-std=c99 -Wall -Wextra -Wpedantic -fPIC"
+CFLAGS="-std=c99 -Wall -Wextra -Wpedantic -fPIC -pthread"
 LFLAGS=""
 
 if [[ $OPT_DEBUG -eq 1 ]]; then
@@ -101,7 +102,8 @@ else
     info "Mode     : release"
 fi
 
-[[ $OPT_SIMD -eq 1 ]] && { CFLAGS="$CFLAGS -DYAPF_USE_SIMD"; info "SIMD     : enabled"; }
+if [[ $OPT_NOSIMD -eq 1 ]]; then CFLAGS="$CFLAGS -DYAPF_NO_SIMD"; info "SIMD     : disabled"
+else info "SIMD     : SSSE3 / NEON, chosen at run time"; fi
 
 # ── Detect OS ────────────────────────────────────────────────────────
 OS=$(uname -s)
@@ -176,6 +178,13 @@ if [[ "$OS" == "Darwin" ]]; then
         ok "dist/macos/libyapf.a      (universal)"
     fi
 
+    step "Building the yapf command-line tool"
+    "$CLANG" $CFLAGS --target=arm64-apple-macos11     tools/yapf_cli.c yapf.c -o /tmp/_yapf_cli_arm64 -lm
+    "$CLANG" $CFLAGS --target=x86_64-apple-macos10.15 tools/yapf_cli.c yapf.c -o /tmp/_yapf_cli_x64 -lm
+    "$LIPO" -create /tmp/_yapf_cli_arm64 /tmp/_yapf_cli_x64 -output dist/macos/yapf
+    rm -f /tmp/_yapf_cli_arm64 /tmp/_yapf_cli_x64
+    ok "dist/macos/yapf           (universal)"
+
 # ── Linux build ──────────────────────────────────────────────────────
 elif [[ "$OS" == "Linux" ]]; then
 
@@ -205,6 +214,8 @@ elif [[ "$OS" == "Linux" ]]; then
         compile_static "$NATIVE_TRIPLE" "dist/$NATIVE_DIR/libyapf.a"
         ok "dist/$NATIVE_DIR/libyapf.a"
     fi
+    "$CLANG" $CFLAGS --target="$NATIVE_TRIPLE" tools/yapf_cli.c yapf.c -o "dist/$NATIVE_DIR/yapf" -lm
+    ok "dist/$NATIVE_DIR/yapf  (command-line tool)"
 
     # ── Cross-compile to the other common arch ────────────────────────
     if [[ "$HOST_ARCH" == "x86_64" ]]; then

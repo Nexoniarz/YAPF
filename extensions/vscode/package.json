@@ -1,0 +1,29 @@
+{
+  "name": "yapf-preview",
+  "displayName": "YAPF Image Preview",
+  "description": "View YAPF (.yapf) lossless images inside VS Code",
+  "version": "1.0.0",
+  "publisher": "Nexoniarz",
+  "license": "Apache-2.0",
+  "icon": "media/icon.png",
+  "repository": { "type": "git", "url": "https://github.com/Nexoniarz/YAPF.git" },
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Visualization", "Other"],
+  "keywords": ["yapf", "image", "texture", "preview", "viewer"],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "yapf.preview",
+        "displayName": "YAPF Image Preview",
+        "selector": [{ "filenamePattern": "*.yapf" }],
+        "priority": "default"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "node scripts/copy-codec.js",
+    "package": "node scripts/copy-codec.js && npx --yes @vscode/vsce package --allow-missing-repository"
+  }
+}
