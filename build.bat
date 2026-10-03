@@ -10,7 +10,7 @@ setlocal enabledelayedexpansion
 ::
 ::  Options:
 ::    --debug        Debug build (no optimisation, full symbols)
-::    --simd         Enable SIMD paths (-DYAPF_USE_SIMD)
+::    --no-simd      Plain C only (SIMD is on by default, picked at run time)
 ::    --static-only  Build only static libraries
 ::    --shared-only  Build only shared libraries (DLL)
 ::    --help         Show this message
@@ -45,13 +45,13 @@ if !ANSI_OK!==1 (
 
 :: ── Option parsing ───────────────────────────────────────────────────
 set OPT_DEBUG=0
-set OPT_SIMD=0
+set OPT_NOSIMD=0
 set OPT_STATIC_ONLY=0
 set OPT_SHARED_ONLY=0
 
 for %%A in (%*) do (
     if /i "%%A"=="--debug"       set OPT_DEBUG=1
-    if /i "%%A"=="--simd"        set OPT_SIMD=1
+    if /i "%%A"=="--no-simd"     set OPT_NOSIMD=1
     if /i "%%A"=="--static-only" set OPT_STATIC_ONLY=1
     if /i "%%A"=="--shared-only" set OPT_SHARED_ONLY=1
     if /i "%%A"=="--help"        goto :show_help
@@ -115,9 +115,11 @@ if !OPT_DEBUG!==1 (
     echo !C_CYN![info]!C_RST!  Mode     : release
 )
 
-if !OPT_SIMD!==1 (
-    set CFLAGS=!CFLAGS! -DYAPF_USE_SIMD
-    echo !C_CYN![info]!C_RST!  SIMD     : enabled
+if !OPT_NOSIMD!==1 (
+    set CFLAGS=!CFLAGS! -DYAPF_NO_SIMD
+    echo !C_CYN![info]!C_RST!  SIMD     : disabled
+) else (
+    echo !C_CYN![info]!C_RST!  SIMD     : SSSE3 / NEON, chosen at run time
 )
 
 set BUILD_SHARED=1
@@ -139,8 +141,13 @@ echo !C_GRN![ ok ]!C_RST!  Header   ^→ dist\include\yapf.h
     echo LIBRARY yapf
     echo EXPORTS
     echo     yapf_load
+    echo     yapf_load_memory
+    echo     yapf_load_mt
+    echo     yapf_load_memory_mt
     echo     yapf_save
+    echo     yapf_encode
     echo     yapf_free
+    echo     yapf_free_buffer
 ) > dist\_yapf.def
 
 :: ====================================================================
@@ -181,6 +188,15 @@ if !BUILD_STATIC!==1 (
     llvm-ar rcs dist\windows-x64\libyapf.a dist\windows-x64\_yapf.obj
     del /q dist\windows-x64\_yapf.obj
     echo !C_GRN![ ok ]!C_RST!  dist\windows-x64\libyapf.a  (static)
+)
+
+:: Command-line tool
+clang --target=x86_64-w64-windows-gnu !CFLAGS! !LFLAGS! -Wno-unused-function ^
+    tools\yapf_cli.c yapf.c -o dist\windows-x64\yapf.exe
+if errorlevel 1 (
+    echo !C_YLW![warn]!C_RST!  yapf.exe build failed (non-fatal)
+) else (
+    echo !C_GRN![ ok ]!C_RST!  dist\windows-x64\yapf.exe  (command-line tool)
 )
 
 :: ====================================================================
@@ -226,6 +242,10 @@ if !BUILD_STATIC!==1 (
         echo !C_YLW![warn]!C_RST!  Windows ARM64 static compile failed — skipping.
     )
 )
+
+clang --target=aarch64-w64-windows-gnu !CFLAGS! !LFLAGS! -Wno-unused-function ^
+    tools\yapf_cli.c yapf.c -o dist\windows-arm64\yapf.exe
+if not errorlevel 1 echo !C_GRN![ ok ]!C_RST!  dist\windows-arm64\yapf.exe  (command-line tool)
 
 :skip_arm64
 

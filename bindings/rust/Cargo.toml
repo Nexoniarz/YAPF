@@ -1,0 +1,12 @@
+[package]
+name = "yapf"
+version = "1.0.0"
+edition = "2021"
+description = "YAPF lossless images: fast byte-aligned decoder and encoder (bindings to the C library)"
+license = "Apache-2.0"
+repository = "https://github.com/Nexoniarz/YAPF"
+links = "yapf"
+build = "build.rs"
+
+[build-dependencies]
+cc = "1"

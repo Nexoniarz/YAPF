@@ -1,0 +1,41 @@
+// Shared helpers for the YAPF Photoshop scripts.
+// Copyright 2026 Nexoniarz — Apache License 2.0.
+//
+// The scripts convert through the `yapf` command-line tool.  It is looked
+// up next to these scripts first (yapf.exe / yapf), then on the PATH.
+
+var YAPF_IS_WINDOWS = $.os.indexOf("Windows") !== -1;
+
+function yapfQuote(s) {
+    return '"' + String(s).replace(/"/g, '\\"') + '"';
+}
+
+function yapfTool() {
+    var here = new File($.fileName).parent;
+    var names = YAPF_IS_WINDOWS ? ["yapf.exe"] : ["yapf"];
+    for (var i = 0; i < names.length; i++) {
+        var f = new File(here.fsName + "/" + names[i]);
+        if (f.exists) return f.fsName;
+    }
+    return names[0];                              // rely on the PATH
+}
+
+// Runs the tool; returns true when `expectOut` was produced.
+function yapfRun(args, expectOut) {
+    var cmd = yapfQuote(yapfTool());
+    for (var i = 0; i < args.length; i++) cmd += " " + (args[i].charAt(0) === "-" ? args[i] : yapfQuote(args[i]));
+    if (YAPF_IS_WINDOWS) cmd = '"' + cmd + '"';    // cmd.exe strips one pair of quotes
+    if (expectOut.exists) expectOut.remove();
+    app.system(cmd);
+    return expectOut.exists;
+}
+
+function yapfTempFile(ext) {
+    return new File(Folder.temp.fsName + "/yapf_" + new Date().getTime() + "_" +
+                    Math.floor(Math.random() * 1e6) + ext);
+}
+
+var YAPF_TOOL_HELP =
+    "The 'yapf' command-line tool was not found or failed.\n\n" +
+    "Put yapf" + (YAPF_IS_WINDOWS ? ".exe" : "") + " in the same folder as this script, " +
+    "or add it to your PATH.\nDownload or build it: https://github.com/Nexoniarz/YAPF";

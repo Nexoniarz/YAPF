@@ -1,0 +1,4 @@
+[Thumbnailer Entry]
+TryExec=yapf
+Exec=yapf thumbnail %i %o %s
+MimeType=image/x-yapf;

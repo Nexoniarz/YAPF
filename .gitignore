@@ -1,0 +1,25 @@
+# build outputs
+/build/
+/dist/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.vsix
+test_yapf_tmp.yapf
+
+# generated: copied from bindings/js/yapf.js when packaging
+/extensions/vscode/media/yapf.js
+node_modules/
+__pycache__/
+*.pyc
+
+# Rust
+/bindings/rust/target/
+/bindings/rust/Cargo.lock
+# C# / Go / Java build outputs
+bin/
+obj/
+*.class

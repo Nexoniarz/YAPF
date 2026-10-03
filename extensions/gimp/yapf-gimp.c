@@ -21,22 +21,24 @@
  *
  * -------------------------------------------------------------------------
  *
- * Compilation:
+ * Compilation (from this folder):
  *   gimptool --install yapf-gimp.c
  *
- * yapf.c is embedded via #include below because gimptool compiles a single
- * source file.  Do NOT link separately — the include IS the build.
+ * yapf.c (two folders up) is embedded via #include below because gimptool
+ * compiles a single source file.  Do NOT link it separately.
  */
 
 #include <libgimp/gimp.h>
+#include <libgimp/gimpui.h>
 
 /* Pull in the entire encoder/decoder as a single translation unit. */
-#include "yapf.c"
+#include "../../yapf.c"
 
 /* ── GIMP procedure names ────────────────────────────────────────────── */
 
 #define LOAD_PROC "file-yapf-load"
 #define SAVE_PROC "file-yapf-save"
+#define PLUG_IN_BINARY "yapf-gimp"
 
 /* ── Plugin type boilerplate ─────────────────────────────────────────── */
 
@@ -123,6 +125,14 @@ static GimpProcedure *yapf_plugin_create_procedure(GimpPlugIn  *plug_in,
             "image/x-yapf");
         gimp_file_procedure_set_extensions(GIMP_FILE_PROCEDURE(procedure),
             "yapf");
+        /* GIMP flattens / converts a copy of the image for us as needed. */
+        gimp_export_procedure_set_capabilities(GIMP_EXPORT_PROCEDURE(procedure),
+            GIMP_EXPORT_CAN_HANDLE_RGB | GIMP_EXPORT_CAN_HANDLE_GRAY |
+            GIMP_EXPORT_CAN_HANDLE_ALPHA, NULL, NULL, NULL);
+        gimp_procedure_add_boolean_argument(procedure, "mipmaps",
+            "Store _mipmaps",
+            "Also store a full mip chain (for game engines and GPUs)",
+            FALSE, G_PARAM_READWRITE);
     }
 
     return procedure;
@@ -142,7 +152,7 @@ static GimpValueArray *yapf_load_run(
     (void)run_mode; (void)metadata; (void)flags; (void)config; (void)run_data;
 
     gchar *path = g_file_get_path(file);
-    yapf_image_t *img = yapf_load(path);
+    yapf_image_t *img = yapf_load_mt(path, 0);  /* all cores */
     g_free(path);
 
     if (!img) {
@@ -164,12 +174,12 @@ static GimpValueArray *yapf_load_run(
         case YAPF_CHANNELS_GRAY:
             base_type  = GIMP_GRAY;
             layer_type = GIMP_GRAY_IMAGE;
-            babl_fmt   = "Y' u8";
+            babl_fmt   = is_srgb ? "Y' u8" : "Y u8";
             break;
         case YAPF_CHANNELS_GRAY_ALPHA:
             base_type  = GIMP_GRAY;
             layer_type = GIMP_GRAYA_IMAGE;
-            babl_fmt   = "Y'A u8";
+            babl_fmt   = is_srgb ? "Y'A u8" : "YA u8";
             break;
         case YAPF_CHANNELS_RGB:
             base_type  = GIMP_RGB;
@@ -204,6 +214,44 @@ static GimpValueArray *yapf_load_run(
 
 /* ── Save handler ────────────────────────────────────────────────────── */
 
+/* Full mip chain with a 2×2 box filter (edges clamp for odd sizes).
+ * Fills img->mips / img->mip_levels; mips[0] aliases img->pixels. */
+static gboolean yapf_build_mips(yapf_image_t *img) {
+    int levels = 1;
+    while (levels < (int)YAPF_MAX_MIPS &&
+           ((img->width >> levels) > 0 || (img->height >> levels) > 0))
+        levels++;
+    img->mips = (uint8_t **)calloc((size_t)levels, sizeof(uint8_t *));
+    if (!img->mips) return FALSE;
+    img->mips[0]    = img->pixels;
+    img->mip_levels = (uint8_t)levels;
+
+    int ch = img->channels;
+    for (int m = 1; m < levels; m++) {
+        uint32_t pw = MAX(1u, img->width >> (m - 1)), ph = MAX(1u, img->height >> (m - 1));
+        uint32_t w  = MAX(1u, img->width >> m),       h  = MAX(1u, img->height >> m);
+        const uint8_t *src = img->mips[m - 1];
+        uint8_t *dst = (uint8_t *)malloc((size_t)w * h * ch);
+        if (!dst) return FALSE;
+        for (uint32_t y = 0; y < h; y++)
+            for (uint32_t x = 0; x < w; x++)
+                for (int c = 0; c < ch; c++) {
+                    uint32_t x0 = MIN(2 * x, pw - 1), x1 = MIN(2 * x + 1, pw - 1);
+                    uint32_t y0 = MIN(2 * y, ph - 1), y1 = MIN(2 * y + 1, ph - 1);
+                    unsigned sum = src[((size_t)y0 * pw + x0) * ch + c] + src[((size_t)y0 * pw + x1) * ch + c]
+                                 + src[((size_t)y1 * pw + x0) * ch + c] + src[((size_t)y1 * pw + x1) * ch + c];
+                    dst[((size_t)y * w + x) * ch + c] = (uint8_t)((sum + 2) / 4);
+                }
+        img->mips[m] = dst;
+    }
+    return TRUE;
+}
+
+static GimpValueArray *yapf_error(GimpProcedure *procedure, const gchar *msg) {
+    return gimp_procedure_new_return_values(procedure, GIMP_PDB_EXECUTION_ERROR,
+               g_error_new_literal(GIMP_PLUG_IN_ERROR, 0, msg));
+}
+
 static GimpValueArray *yapf_save_run(
         GimpProcedure       *procedure,
         GimpRunMode          run_mode,
@@ -214,93 +262,88 @@ static GimpValueArray *yapf_save_run(
         GimpProcedureConfig *config,
         gpointer             run_data)
 {
-    (void)run_mode; (void)options; (void)metadata; (void)config; (void)run_data;
+    (void)metadata; (void)run_data;
 
-    /* Retrieve the top-most layer. */
-    GimpLayer  **layers   = gimp_image_get_layers(image);
-    gint         n_layers = 0;
-    if (layers) { while (layers[n_layers]) n_layers++; }
-
-    if (!layers || n_layers == 0) {
-        g_free(layers);
-        GError *err = g_error_new(GIMP_PLUG_IN_ERROR, 0,
-                                  "No layers to export.");
-        return gimp_procedure_new_return_values(procedure,
-                   GIMP_PDB_EXECUTION_ERROR, err);
+    if (run_mode == GIMP_RUN_INTERACTIVE) {
+        gimp_ui_init(PLUG_IN_BINARY);
+        GtkWidget *dialog = gimp_export_procedure_dialog_new(
+            GIMP_EXPORT_PROCEDURE(procedure), config, image);
+        gimp_procedure_dialog_fill(GIMP_PROCEDURE_DIALOG(dialog), NULL);
+        gboolean ok = gimp_procedure_dialog_run(GIMP_PROCEDURE_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        if (!ok)
+            return gimp_procedure_new_return_values(procedure, GIMP_PDB_CANCEL, NULL);
     }
 
-    GimpDrawable *drawable = GIMP_DRAWABLE(layers[0]);
-    g_free(layers);
+    gboolean mipmaps = FALSE;
+    g_object_get(config, "mipmaps", &mipmaps, NULL);
 
-    /* Determine channel layout and GPU format hint. */
-    gboolean has_alpha = gimp_drawable_has_alpha(drawable);
-    gboolean is_gray   = gimp_drawable_is_gray(drawable);
+    /* A flattened copy when the image has several layers; the visible
+     * result is what gets exported. */
+    GimpExportReturn export = gimp_export_options_get_image(options, &image);
+    GList *layers = gimp_image_list_layers(image);
+    if (!layers) {
+        if (export == GIMP_EXPORT_EXPORT) gimp_image_delete(image);
+        return yapf_error(procedure, "No layers to export.");
+    }
+    GimpDrawable *drawable = GIMP_DRAWABLE(layers->data);
+    g_list_free(layers);
+
+    gboolean     has_alpha = gimp_drawable_has_alpha(drawable);
+    gboolean     is_gray   = gimp_drawable_is_gray(drawable);
     const gchar *babl_fmt;
-    uint8_t ch;
-    uint8_t gpu_fmt;
-    uint8_t flags = YAPF_FLAG_SRGB;  /* GIMP's native u8 formats are sRGB */
+    uint8_t      ch, gpu_fmt;
 
+    /* GIMP's 8-bit buffers are gamma encoded, so pixels are written as sRGB. */
     if (is_gray) {
-        if (has_alpha) {
-            ch = YAPF_CHANNELS_GRAY_ALPHA; babl_fmt = "Y'A u8";
-            gpu_fmt = YAPF_GPU_RG8;
-            flags   = 0;  /* grayscale has no sRGB GPU hint */
-        } else {
-            ch = YAPF_CHANNELS_GRAY; babl_fmt = "Y' u8";
-            gpu_fmt = YAPF_GPU_R8;
-            flags   = 0;
-        }
+        ch       = has_alpha ? YAPF_CHANNELS_GRAY_ALPHA : YAPF_CHANNELS_GRAY;
+        babl_fmt = has_alpha ? "Y'A u8" : "Y' u8";
+        gpu_fmt  = has_alpha ? YAPF_GPU_RG8 : YAPF_GPU_R8;
     } else {
-        if (has_alpha) {
-            ch = YAPF_CHANNELS_RGBA; babl_fmt = "R'G'B'A u8";
-            gpu_fmt = YAPF_GPU_SRGB8_A8;
-        } else {
-            ch = YAPF_CHANNELS_RGB; babl_fmt = "R'G'B' u8";
-            gpu_fmt = YAPF_GPU_SRGB8;
-        }
+        ch       = has_alpha ? YAPF_CHANNELS_RGBA : YAPF_CHANNELS_RGB;
+        babl_fmt = has_alpha ? "R'G'B'A u8" : "R'G'B' u8";
+        gpu_fmt  = has_alpha ? YAPF_GPU_SRGB8_A8 : YAPF_GPU_SRGB8;
     }
 
     gint w = gimp_drawable_get_width(drawable);
     gint h = gimp_drawable_get_height(drawable);
-
-    /* Read pixel data from GIMP's buffer. */
     uint8_t *pixels = (uint8_t *)malloc((size_t)w * (size_t)h * ch);
     if (!pixels) {
-        GError *err = g_error_new(GIMP_PLUG_IN_ERROR, 0, "Out of memory.");
-        return gimp_procedure_new_return_values(procedure,
-                   GIMP_PDB_EXECUTION_ERROR, err);
+        if (export == GIMP_EXPORT_EXPORT) gimp_image_delete(image);
+        return yapf_error(procedure, "Out of memory.");
     }
 
     GeglBuffer *buffer = gimp_drawable_get_buffer(drawable);
-    gegl_buffer_get(buffer,
-        GEGL_RECTANGLE(0, 0, w, h),
-        1.0, babl_format(babl_fmt),
-        pixels, GEGL_AUTO_ROWSTRIDE, GEGL_ABYSS_NONE);
+    gegl_buffer_get(buffer, GEGL_RECTANGLE(0, 0, w, h), 1.0,
+                    babl_format(babl_fmt), pixels,
+                    GEGL_AUTO_ROWSTRIDE, GEGL_ABYSS_NONE);
     g_object_unref(buffer);
+    if (export == GIMP_EXPORT_EXPORT) gimp_image_delete(image);
 
-    /* Build yapf_image_t — base level only, no mip chain from GIMP. */
     yapf_image_t img;
+    memset(&img, 0, sizeof(img));
     img.width      = (uint32_t)w;
     img.height     = (uint32_t)h;
     img.channels   = ch;
     img.gpu_format = gpu_fmt;
-    img.flags      = flags;
+    img.flags      = YAPF_FLAG_SRGB;
     img.mip_levels = 1;
     img.pixels     = pixels;
-    img.mips       = NULL;
 
-    gchar *path   = g_file_get_path(file);
-    int    result = yapf_save(path, &img);
-    g_free(path);
+    int result = YAPF_ERR_OOM;
+    if (!mipmaps || yapf_build_mips(&img)) {
+        gchar *path = g_file_get_path(file);
+        result = yapf_save(path, &img);
+        g_free(path);
+    }
+    if (img.mips) {
+        for (int m = 1; m < img.mip_levels; m++) free(img.mips[m]);
+        free(img.mips);
+    }
     free(pixels);
 
-    if (result != YAPF_OK) {
-        GError *err = g_error_new(GIMP_PLUG_IN_ERROR, 0,
-                                  "Failed to export YAPF file.");
-        return gimp_procedure_new_return_values(procedure,
-                   GIMP_PDB_EXECUTION_ERROR, err);
-    }
-
+    if (result != YAPF_OK)
+        return yapf_error(procedure, "Failed to export YAPF file.");
     return gimp_procedure_new_return_values(procedure, GIMP_PDB_SUCCESS, NULL);
 }
 
