@@ -233,6 +233,17 @@ yapf_image_t *yapf_load_memory_mt(const void *buffer, size_t size, int threads);
 int yapf_save(const char *filename, const yapf_image_t *img);
 
 /*
+ * yapf_encode — encode an image into memory.
+ * On success *out_data points to *out_size bytes of a complete .yapf file;
+ * release it with yapf_free_buffer().  Same rules and return codes as
+ * yapf_save() (no YAPF_ERR_IO).
+ */
+int yapf_encode(const yapf_image_t *img, void **out_data, size_t *out_size);
+
+/* yapf_free_buffer — release memory returned by yapf_encode().  NULL-safe. */
+void yapf_free_buffer(void *data);
+
+/*
  * yapf_free — release all memory owned by an image returned by yapf_load().
  * NULL-safe.
  */

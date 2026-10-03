@@ -193,7 +193,7 @@ static int yapf__width(uint8_t z) {
     return w;
 }
 
-static const uint8_t yapf__zero_row[YAPF_TILE_SIZE + 1];
+static const uint8_t yapf__zero_row[YAPF_TILE_SIZE + 1] = { 0 };
 
 /* ── SIMD ────────────────────────────────────────────────────────────── */
 /*
@@ -1409,11 +1409,14 @@ yapf_image_t *yapf_load_mt(const char *filename, int threads) {
 }
 
 /* ========================================================================
- *  yapf_save
+ *  yapf_encode / yapf_save
  * ======================================================================== */
 
-int yapf_save(const char *filename, const yapf_image_t *img) {
-    if (!filename || !img || !img->pixels)        return YAPF_ERR_INVALID;
+int yapf_encode(const yapf_image_t *img, void **out_data, size_t *out_size) {
+    if (!out_data || !out_size) return YAPF_ERR_INVALID;
+    *out_data = NULL;
+    *out_size = 0;
+    if (!img || !img->pixels)                     return YAPF_ERR_INVALID;
     if (img->width == 0 || img->width > YAPF_MAX_DIM)   return YAPF_ERR_INVALID;
     if (img->height == 0 || img->height > YAPF_MAX_DIM) return YAPF_ERR_INVALID;
     if (img->channels < 1 || img->channels > 4)   return YAPF_ERR_INVALID;
@@ -1440,44 +1443,60 @@ int yapf_save(const char *filename, const yapf_image_t *img) {
     }
 
     /* Offsets are 32-bit: refuse files that would not fit. */
-    uint32_t offsets[YAPF_MAX_MIPS];
-    uint64_t cur = YAPF__HDR_LEN + (uint64_t)mip_levels * YAPF__MIP_ENTRY;
+    uint64_t total = YAPF__HDR_LEN + (uint64_t)mip_levels * YAPF__MIP_ENTRY;
     for (uint8_t m = 0; m < mip_levels && err == YAPF_OK; m++) {
-        offsets[m] = (uint32_t)cur;
-        cur += bws[m].len;
-        if (cur > 0xFFFFFFFFull) err = YAPF_ERR_INVALID;
+        total += bws[m].len;
+        if (total > 0xFFFFFFFFull) err = YAPF_ERR_INVALID;
     }
 
-    FILE *f = NULL;
-    if (err == YAPF_OK && !(f = fopen(filename, "wb"))) err = YAPF_ERR_IO;
+    uint8_t *file = NULL;
+    if (err == YAPF_OK && !(file = (uint8_t *)malloc((size_t)total))) err = YAPF_ERR_OOM;
 
     if (err == YAPF_OK) {
-        uint8_t hdr[YAPF__HDR_LEN];
-        memset(hdr, 0, sizeof(hdr));
-        memcpy(hdr, YAPF__MAGIC, 4);
-        hdr[4] = YAPF__VERSION;
-        hdr[5] = img->channels;
-        hdr[6] = img->gpu_format;
-        hdr[7] = mip_levels;
-        hdr[8] = img->flags;
-        yapf__w32le(hdr + 12, img->width);
-        yapf__w32le(hdr + 16, img->height);
-        if (fwrite(hdr, 1, YAPF__HDR_LEN, f) != YAPF__HDR_LEN) err = YAPF_ERR_IO;
+        memset(file, 0, YAPF__HDR_LEN);
+        memcpy(file, YAPF__MAGIC, 4);
+        file[4] = YAPF__VERSION;
+        file[5] = img->channels;
+        file[6] = img->gpu_format;
+        file[7] = mip_levels;
+        file[8] = img->flags;
+        yapf__w32le(file + 12, img->width);
+        yapf__w32le(file + 16, img->height);
 
-        for (uint8_t m = 0; m < mip_levels && err == YAPF_OK; m++) {
-            uint8_t entry[YAPF__MIP_ENTRY];
-            yapf__w32le(entry + 0, offsets[m]);
+        size_t pos = YAPF__HDR_LEN + (size_t)mip_levels * YAPF__MIP_ENTRY;
+        for (uint8_t m = 0; m < mip_levels; m++) {
+            uint8_t *entry = file + YAPF__HDR_LEN + (size_t)m * YAPF__MIP_ENTRY;
+            yapf__w32le(entry + 0, (uint32_t)pos);
             yapf__w32le(entry + 4, (uint32_t)bws[m].len);
-            if (fwrite(entry, 1, YAPF__MIP_ENTRY, f) != YAPF__MIP_ENTRY)
-                err = YAPF_ERR_IO;
+            memcpy(file + pos, bws[m].buf, bws[m].len);
+            pos += bws[m].len;
         }
-        for (uint8_t m = 0; m < mip_levels && err == YAPF_OK; m++)
-            if (fwrite(bws[m].buf, 1, bws[m].len, f) != bws[m].len)
-                err = YAPF_ERR_IO;
-        if (fclose(f) != 0 && err == YAPF_OK) err = YAPF_ERR_IO;
+        *out_data = file;
+        *out_size = (size_t)total;
     }
 
     for (uint8_t m = 0; m < mip_levels; m++) free(bws[m].buf);
+    return err;
+}
+
+void yapf_free_buffer(void *data) {
+    free(data);
+}
+
+int yapf_save(const char *filename, const yapf_image_t *img) {
+    if (!filename) return YAPF_ERR_INVALID;
+    void  *data = NULL;
+    size_t size = 0;
+    int    err  = yapf_encode(img, &data, &size);
+    if (err != YAPF_OK) return err;
+
+    FILE *f = fopen(filename, "wb");
+    if (!f) err = YAPF_ERR_IO;
+    else {
+        if (fwrite(data, 1, size, f) != size) err = YAPF_ERR_IO;
+        if (fclose(f) != 0 && err == YAPF_OK) err = YAPF_ERR_IO;
+    }
+    yapf_free_buffer(data);
     return err;
 }
 

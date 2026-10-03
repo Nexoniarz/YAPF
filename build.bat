@@ -145,7 +145,9 @@ echo !C_GRN![ ok ]!C_RST!  Header   ^→ dist\include\yapf.h
     echo     yapf_load_mt
     echo     yapf_load_memory_mt
     echo     yapf_save
+    echo     yapf_encode
     echo     yapf_free
+    echo     yapf_free_buffer
 ) > dist\_yapf.def
 
 :: ====================================================================

@@ -21,3 +21,5 @@ It uses the C library through `ctypes` when it finds one:
 Without the library it falls back to a pure-Python decoder that needs
 `numpy` (decoding only; about 1.4 s for a 4K image).  `yapf.backend()`
 tells you which one is in use.
+
+Example: `YAPF_LIBRARY=../../build/libyapf.so python3 example.py ../../other/YAPF.YAPF`

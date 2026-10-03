@@ -44,18 +44,39 @@ static void fill(uint8_t *p, int w, int h, int ch, int kind) {
 }
 
 static uint8_t *encode_mem(const yapf_image_t *img, size_t *n) {
+    void *data = NULL;
+    if (yapf_encode(img, &data, n) != YAPF_OK) return NULL;
+    uint8_t *copy = (uint8_t *)malloc(*n);
+    if (copy) memcpy(copy, data, *n);
+    yapf_free_buffer(data);
+    return copy;
+}
+
+/* yapf_save() writes exactly what yapf_encode() returns. */
+static void save_matches_encode(void) {
     const char *tmp = "test_yapf_tmp.yapf";
-    if (yapf_save(tmp, img) != YAPF_OK) return NULL;
-    FILE *f = fopen(tmp, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    *n = (size_t)ftell(f);
-    rewind(f);
-    uint8_t *b = (uint8_t *)malloc(*n);
-    if (b && fread(b, 1, *n, f) != *n) { free(b); b = NULL; }
-    fclose(f);
+    uint8_t px[37 * 23 * 3];
+    fill(px, 37, 23, 3, 3);
+    yapf_image_t img;
+    memset(&img, 0, sizeof(img));
+    img.width = 37; img.height = 23; img.channels = 3; img.mip_levels = 1; img.pixels = px;
+    size_t len = 0;
+    uint8_t *mem = encode_mem(&img, &len);
+    int ok = mem && yapf_save(tmp, &img) == YAPF_OK;
+    FILE *f = ok ? fopen(tmp, "rb") : NULL;
+    if (f) {
+        uint8_t *disk = (uint8_t *)malloc(len + 1);
+        ok = fread(disk, 1, len + 1, f) == len && memcmp(disk, mem, len) == 0;
+        free(disk);
+        fclose(f);
+    }
     remove(tmp);
-    return b;
+    free(mem);
+    CHECK(ok, "yapf_save writes the same bytes as yapf_encode");
+    void *d = (void *)1;
+    size_t n = 1;
+    CHECK(yapf_encode(NULL, &d, &n) == YAPF_ERR_INVALID && d == NULL && n == 0,
+          "yapf_encode rejects a NULL image");
 }
 
 static void roundtrip(int w, int h, int ch, int kind) {
@@ -162,6 +183,7 @@ int main(int argc, char **argv) {
                 roundtrip(sizes[s][0], sizes[s][1], ch, kind);
     mips();
     corruption();
+    save_matches_encode();
 
     const char *sample = argc > 1 ? argv[1] : "other/YAPF.YAPF";
     yapf_image_t *img = yapf_load(sample);

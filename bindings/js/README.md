@@ -19,4 +19,6 @@ ctx.putImageData(new ImageData(YAPF.toRGBA(img), img.width, img.height), 0, 0);
 `decode` throws an `Error` for corrupt or unsupported data.  Speed: a 4K
 image decodes in about 150 ms in Node / Chrome (the C library: 6 ms).
 
-Tests: `node test.js`.
+TypeScript types are in `yapf.d.ts`.
+
+Example: `node example.mjs ../../other/YAPF.YAPF` · tests: `node test.js`.

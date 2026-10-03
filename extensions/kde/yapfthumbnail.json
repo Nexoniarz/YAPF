@@ -1,0 +1,7 @@
+{
+    "CacheThumbnail": true,
+    "KPlugin": {
+        "MimeTypes": ["image/x-yapf"],
+        "Name": "YAPF Images"
+    }
+}

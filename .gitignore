@@ -15,3 +15,11 @@ test_yapf_tmp.yapf
 node_modules/
 __pycache__/
 *.pyc
+
+# Rust
+/bindings/rust/target/
+/bindings/rust/Cargo.lock
+# C# / Go / Java build outputs
+bin/
+obj/
+*.class

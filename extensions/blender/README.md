@@ -20,7 +20,9 @@ the .blend** and survive saving and reopening.
    and pick the zip.
 
 The zip contains the native YAPF library for Windows, macOS and Linux (x64
-and ARM64).  If no library matches your system, the extension still
+and ARM64).  Tested in Blender 5.1 on Linux; the Windows library is tested
+outside Blender, and the macOS libraries are cross-compiled and **not yet run
+on a Mac**.  If no library matches your system, the extension still
 **imports** using a pure-Python decoder (numpy, bundled with Blender), but
 cannot export.
 

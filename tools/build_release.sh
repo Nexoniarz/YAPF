@@ -11,6 +11,7 @@
 #   yapf-figma.zip             Figma plugin (import via manifest.json)
 #   yapf-photoshop.zip         Photoshop scripts
 #   yapf-gimp-source.zip       GIMP plugin source (build with gimptool)
+#   yapf-kde-source.zip        Dolphin thumbnail plugin source (build with CMake)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=dist/release
@@ -55,4 +56,5 @@ fi
 python3 -m zipfile -c "$OUT/yapf-figma.zip" extensions/figma/manifest.json extensions/figma/code.js extensions/figma/ui.html
 python3 -m zipfile -c "$OUT/yapf-photoshop.zip" extensions/photoshop
 python3 -m zipfile -c "$OUT/yapf-gimp-source.zip" extensions/gimp yapf.c yapf.h
+python3 -m zipfile -c "$OUT/yapf-kde-source.zip" extensions/kde extensions/linux/yapf-mime.xml yapf.c yapf.h
 ls -la "$OUT"

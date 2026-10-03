@@ -8,8 +8,8 @@ model: every structure is byte aligned, and the decoder runs short loops that
 modern CPUs execute at memory speed — with SSE / NEON where available.  The
 encoder does the hard work, so the decoder only follows instructions.
 
-- **6–10× faster decoding than PNG** (stb_image), single-threaded; a 4K image
-  decodes in about 6 ms (5.6 GB/s).  Multithreaded decoding is optional.
+- **5–12× faster decoding than PNG** (stb_image), single-threaded; a 4K image
+  decodes in about 6–7 ms (around 5 GB/s).  Multithreaded decoding is optional.
 - **Smaller than PNG** on UI, icons and screenshots; 20–45 % larger on photos
   and natural textures — the price of having no entropy coder.
 - **Made for games and tools too**: mipmaps, GPU format hint, sRGB /
@@ -25,21 +25,31 @@ This is **YAPF version 1**, the first stable format.
 
 | Where | What you get | Guide | Status |
 | :---- | :----------- | :---- | :----- |
-| **C / C++** | `yapf.h` + `yapf.c`, drop into any project | [below](#c--c) | ✅ tested on Linux x64, Windows x64, Linux ARM64 |
-| **Command line** | convert PNG/JPG/TGA/BMP/PSD/GIF ↔ YAPF, `info`, `bench`, `thumbnail` | [below](#command-line) | ✅ tested on Linux, Windows |
-| **GIMP 3** | open, export (with mipmaps) | [extensions/gimp](extensions/gimp) | ✅ tested in GIMP 3.0.8 |
+| **C / C++** | `yapf.h` + `yapf.c`, drop into any project (compiles as C or C++) | [below](#c--c) | ✅ tested — see [platforms](#platforms) |
+| **Command line** | convert PNG/JPG/TGA/BMP/PSD/GIF ↔ YAPF, `compare`, `info`, `bench`, `thumbnail` | [below](#command-line) | ✅ tested on Linux and Windows |
+| **Your language** | Python, C#, Rust, Go, Java, Zig, Lua, JavaScript / TypeScript, … | [docs/LANGUAGES.md](docs/LANGUAGES.md) | ✅ every binding tested |
+| **GIMP 3** | open, export (flattened, optional mipmaps) | [extensions/gimp](extensions/gimp) | ✅ tested in GIMP 3.0.8 |
 | **Blender 4.2+** | import, export, drag & drop, image as plane | [extensions/blender](extensions/blender) | ✅ tested in Blender 5.1 |
-| **VS Code** | image preview with zoom and mip picker | [extensions/vscode](extensions/vscode) | ✅ packaged, preview tested in Chromium |
-| **Figma** | import `.yapf`, export selection as `.yapf` | [extensions/figma](extensions/figma) | ✅ plugin UI tested in Chromium |
-| **Photoshop** | File → Scripts → Open YAPF / Save as YAPF | [extensions/photoshop](extensions/photoshop) | ⚠️ not yet tested inside Photoshop |
-| **Linux desktop** | file type + thumbnails in GNOME Files, Nemo, Caja, Thunar | [extensions/linux](extensions/linux) | ⚠️ thumbnailer tested, not in a file manager |
-| **Python** | `yapf.load()` / `yapf.save()` | [bindings/python](bindings/python) | ✅ tested |
-| **JavaScript** | browsers, Node.js, workers | [bindings/js](bindings/js) | ✅ tested, byte-identical to C |
+| **KDE Dolphin** | thumbnails for `.yapf` files | [extensions/kde](extensions/kde) | ⚠️ tested through KDE's plugin loader (KF6); not yet inside a running Dolphin |
+| **Linux desktop** | file type + thumbnails in GNOME Files, Nemo, Caja, Thunar | [extensions/linux](extensions/linux) | ⚠️ thumbnail command tested; not yet in a file manager |
+| **VS Code** | image preview with zoom and mip picker | [extensions/vscode](extensions/vscode) | ⚠️ packaged; preview code tested in a browser engine (Chromium); **not yet run inside VS Code** |
+| **Figma** | import `.yapf`, export selection as `.yapf` | [extensions/figma](extensions/figma) | ⚠️ plugin UI tested in a browser engine with a simulated Figma; **not yet run inside Figma** |
+| **Photoshop** | File → Scripts → Open YAPF / Save as YAPF | [extensions/photoshop](extensions/photoshop) | ⚠️ **syntax-checked only; not yet run in Photoshop** |
 
 Pre-built downloads (command-line tool and libraries for Windows, macOS and
 Linux, plus the plugin packages) are published on the
 [Releases](https://github.com/Nexoniarz/YAPF/releases) page; everything can
 also be built from source as described below.
+
+### Platforms
+
+| Platform | Status |
+| :------- | :----- |
+| Linux x64 | ✅ built and fully tested |
+| Windows x64 | ✅ built and fully tested (MinGW and Zig builds, run under Wine) |
+| Linux ARM64 | ✅ built and fully tested (NEON, run under qemu) |
+| Windows ARM64 | ⚠️ built only, not run |
+| macOS x64 / ARM64 | ⚠️ **cross-compiled only, not yet run on a Mac** |
 
 ---
 
@@ -53,6 +63,7 @@ yapf texture.yapf mip2.png --mip 2    # export one mip level
 yapf info photo.yapf                  # size, channels, mips, flags, ratio
 yapf bench photo.yapf                 # decode speed, 1 thread and all cores
 yapf thumbnail photo.yapf thumb.png 256
+yapf compare photo.png ui.png         # size and decode speed vs the original format
 ```
 
 Options when writing `.yapf`: `--mips`, `--linear` (pixels are not sRGB),
@@ -62,25 +73,24 @@ Options when writing `.yapf`: `--mips`, `--linear` (pixels are not sRGB),
 
 ## Benchmark
 
-Single core, AMD Ryzen 7 5700G, `gcc -O2`.  PNG is decoded with `stb_image`;
-the PNG files are the ones shipped with the respective projects.  "Plain C"
-is the library built with `-DYAPF_NO_SIMD`; the default build uses SSE / NEON.
+`yapf compare` on a mixed set of images: one binary (`make`, gcc -O2) for
+both formats, PNG decoded with stb_image, one core, AMD Ryzen 7 5700G.
+Every result is checked to decode back to the exact original pixels.
 
-| Image                  | Raw     | PNG    | **YAPF** | vs PNG | PNG decode | YAPF, plain C | **YAPF (default)** |
-| :--------------------- | ------: | -----: | -------: | -----: | ---------: | ------------: | -----------------: |
-| Wallpaper 3840×2160    | 32400 K | 1812 K | 2267 K   | 125 %  | 44.7 ms¹   | 10.3 ms       | **5.9 ms** (5.6 GB/s) |
-| UI screenshot 261×430  | 438 K   | 176 K  | 143 K    | 81 %   | 1.6 ms     | 0.31 ms       | **0.17 ms**        |
-| UI screenshot 305×529  | 630 K   | 201 K  | 185 K    | 92 %   | 2.1 ms     | 0.45 ms       | **0.24 ms**        |
-| App icon 128×128       | 64 K    | 24 K   | 23 K     | 93 %   | 0.26 ms    | 0.06 ms       | **0.03 ms**        |
-| Rock texture 512×512   | 768 K   | 182 K  | 221 K    | 121 %  | 1.4 ms     | 0.35 ms       | **0.16 ms**        |
-| Wood texture 512×512   | 768 K   | 185 K  | 234 K    | 126 %  | 1.4 ms     | 0.46 ms       | **0.16 ms**        |
-| Canvas texture 512×512 | 768 K   | 171 K  | 245 K    | 143 %  | 1.0 ms     | 0.35 ms       | **0.15 ms**        |
-| Pixel art 512×512      | 1024 K  | —      | 66 K     | —      | —          | 0.74 ms       | **0.32 ms**        |
-| Random noise 512×512   | 1024 K  | —      | 1024 K   | —      | —          | 0.1 ms        | 0.1 ms             |
+| Image | PNG | YAPF | YAPF / PNG size | PNG decode | YAPF decode | Faster |
+| :---- | --: | ---: | --------------: | ---------: | ----------: | -----: |
+| UI screenshot 261×430 | 176.6 KB | 143.7 KB | **81 %** | 2.05 ms | 0.17 ms | **12×** |
+| UI screenshot 305×529 | 201.5 KB | 185.0 KB | **92 %** | 2.55 ms | 0.24 ms | **11×** |
+| App icon 128×128 | 24.9 KB | 23.1 KB | **93 %** | 0.30 ms | 0.026 ms | **11×** |
+| Wallpaper 3840×2160 | 1.77 MB | 2.21 MB | 125 % | 73.7 ms | 6.8 ms | **11×** |
+| Rock texture 512×512 | 182.6 KB | 221.8 KB | 121 % | 1.64 ms | 0.17 ms | **10×** |
+| Wood texture 512×512 | 185.8 KB | 234.1 KB | 126 % | 1.64 ms | 0.17 ms | **10×** |
+| Canvas texture 512×512 | 171.5 KB | 245.6 KB | 143 % | 1.36 ms | 0.16 ms | **9×** |
+| YAPF logo 512×512 | 60.5 KB | 89.3 KB | 148 % | 1.25 ms | 0.25 ms | **5×** |
 
-¹ PNG decode of the wallpaper measured between 44.7 and 66 ms depending on
-the harness; the table uses the fastest.  `-O2` and `-O3` builds of YAPF
-perform the same.
+Smaller than PNG on UI-style images, 20–50 % larger on photos and textures
+(the price of having no entropy coder), and 5–12× faster to decode.  More
+in [examples/](examples) — and run `yapf compare` on your own images.
 
 ---
 
@@ -177,6 +187,13 @@ levels; `img->mips` may be `NULL` when `mip_levels == 1`.  Returns `YAPF_OK`
 (0) on success or a negative `YAPF_ERR_*` code on failure.
 
 ```c
+int  yapf_encode(const yapf_image_t *img, void **out_data, size_t *out_size);
+void yapf_free_buffer(void *data);
+```
+Encodes into memory: `*out_data` receives a complete `.yapf` file of
+`*out_size` bytes, to be released with `yapf_free_buffer()`.
+
+```c
 void yapf_free(yapf_image_t *img);
 ```
 Releases memory returned by the loaders.  Passing `NULL` is safe.
@@ -256,22 +273,27 @@ TILE (64×64)        header byte: stored raw, or constant-plane mask + colour tr
 ## Testing
 
 ```sh
-make test                      # C suite: 784 checks, plus JavaScript if node is installed
+make test                      # C suite: 786 checks, plus JavaScript if node is installed
 node bindings/js/test.js       # JavaScript: round-trips, sample file, corrupt input
 ```
 
-What has been verified for this release:
+What has been verified:
 
 - exact round-trips for 1–4 channels, odd sizes from 1×1 up, mip chains,
-  single- and multi-threaded decoding;
-- the same tests pass on **Linux x64**, **Windows x64** (MinGW, run under
-  Wine), **Linux ARM64** (NEON, run under qemu), with and without SIMD, and
-  under AddressSanitizer, UndefinedBehaviorSanitizer and ThreadSanitizer;
+  single- and multi-threaded decoding, in-memory and file encoding;
+- the same tests pass on Linux x64, Windows x64 (run under Wine) and Linux
+  ARM64 (NEON, run under qemu), with and without SIMD, compiled as C and as
+  C++, and under AddressSanitizer, UndefinedBehaviorSanitizer and
+  ThreadSanitizer;
 - thousands of corrupted and truncated files are rejected without crashing;
-- the JavaScript and Python versions produce byte-identical files to C;
-- the GIMP plugin and the Blender extension in the real applications.
+- every language binding runs its example; JavaScript, Python, C++, C#,
+  Rust, Go, Java and Lua re-encode the sample to byte-identical output;
+- the GIMP plugin in GIMP 3.0.8 and the Blender extension in Blender 5.1;
+- the KDE thumbnailer through KDE's own plugin loader.
 
-The macOS builds are cross-compiled and not yet run on a Mac.
+**Not yet verified:** running on a Mac (macOS builds are cross-compiled
+only), Windows on ARM, and running inside Photoshop, VS Code, Figma or a
+live Dolphin / GNOME file manager.
 
 ---
 
@@ -282,14 +304,16 @@ yapf.h, yapf.c          the library (format spec in yapf.h)
 tools/yapf_cli.c        the `yapf` command-line tool
 tools/build_release.sh  builds every download for all platforms
 tests/test_yapf.c       C test suite
-bindings/js/            JavaScript encoder / decoder
-bindings/python/        Python module
+examples/               speed and size comparison, C example
+docs/LANGUAGES.md       using YAPF from other languages
+bindings/               cpp, python, csharp, rust, go, java, zig, lua, js
 extensions/gimp/        GIMP 3 plugin
 extensions/blender/     Blender extension
+extensions/kde/         Dolphin thumbnail plugin (KF6)
+extensions/linux/       MIME type and freedesktop thumbnailer
 extensions/vscode/      VS Code preview
 extensions/figma/       Figma plugin
 extensions/photoshop/   Photoshop scripts
-extensions/linux/       MIME type and thumbnailer
 third_party/            stb_image / stb_image_write (public domain, CLI only)
 other/YAPF.YAPF         sample image (the YAPF logo)
 ```

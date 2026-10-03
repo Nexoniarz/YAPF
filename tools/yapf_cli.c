@@ -21,6 +21,7 @@
  *  yapf info <file.yapf>               print header information
  *  yapf bench <file.yapf>              time decoding
  *  yapf thumbnail <in.yapf> <out.png> [size]   small preview (default 256)
+ *  yapf compare <image.png> [more…]    size and decode speed: original vs YAPF
  *
  *  Reads PNG, JPEG, BMP, TGA, GIF (first frame), PSD (composite), PNM, HDR
  *  (tone-clamped) and YAPF.  Writes YAPF, PNG, BMP, TGA and JPEG.
@@ -249,12 +250,119 @@ static int cmd_thumbnail(const char *in, const char *out, int size) {
     return ok ? 0 : 1;
 }
 
+/* Best time over several rounds of a decode call, for fair small-image timing. */
+#define YAPF_TIME_BEST(result, expr)                                        \
+    do {                                                                    \
+        double one_ = now_s(); { expr; } one_ = now_s() - one_;             \
+        int reps_ = (int)(0.02 / (one_ > 1e-6 ? one_ : 1e-6)) + 1;          \
+        double best_ = 1e9;                                                 \
+        for (int r_ = 0; r_ < 9; r_++) {                                    \
+            double t_ = now_s();                                            \
+            for (int k_ = 0; k_ < reps_; k_++) { expr; }                    \
+            t_ = (now_s() - t_) / reps_;                                    \
+            if (t_ < best_) best_ = t_;                                     \
+        }                                                                   \
+        (result) = best_;                                                   \
+    } while (0)
+
+static const char *fmt_kb(double bytes, char *buf) {
+    if (bytes >= 1024.0 * 1024.0) sprintf(buf, "%.2f MB", bytes / (1024.0 * 1024.0));
+    else sprintf(buf, "%.1f KB", bytes / 1024.0);
+    return buf;
+}
+
+static const char *ext_name(const char *path) {
+    const char *dot = strrchr(path, '.');
+    static char name[8];
+    size_t i = 0;
+    if (!dot) return "file";
+    for (dot++; *dot && i < sizeof(name) - 1; dot++) name[i++] = (char)toupper((unsigned char)*dot);
+    name[i] = 0;
+    return name;
+}
+
+/* Original format vs YAPF: size, decode time (1 thread / all cores),
+ * and a lossless check. */
+static int cmd_compare(int n, char **paths) {
+    int rc = 0;
+    double tot_src = 0, tot_yapf = 0, tot_src_t = 0, tot_yapf_t = 0;
+    for (int i = 0; i < n; i++) {
+        const char *path = paths[i];
+        if (is_yapf(path)) {
+            fprintf(stderr, "yapf: compare takes the original image (PNG, JPG, ...), not %s\n", path);
+            rc = 1;
+            continue;
+        }
+        FILE *f = fopen(path, "rb");
+        if (!f) { fprintf(stderr, "yapf: cannot open %s\n", path); rc = 1; continue; }
+        fseek(f, 0, SEEK_END);
+        long fsz = ftell(f);
+        rewind(f);
+        uint8_t *src = (uint8_t *)malloc((size_t)fsz);
+        if (!src || fread(src, 1, (size_t)fsz, f) != (size_t)fsz) { fclose(f); free(src); rc = 1; continue; }
+        fclose(f);
+
+        int w, h, ch;
+        uint8_t *px = stbi_load_from_memory(src, (int)fsz, &w, &h, &ch, 0);
+        if (!px) { fprintf(stderr, "yapf: cannot read %s: %s\n", path, stbi_failure_reason()); free(src); rc = 1; continue; }
+
+        yapf_image_t img;
+        memset(&img, 0, sizeof(img));
+        img.width = (uint32_t)w; img.height = (uint32_t)h; img.channels = (uint8_t)ch;
+        img.mip_levels = 1; img.pixels = px; img.flags = YAPF_FLAG_SRGB;
+        img.gpu_format = gpu_hint(ch, 1);
+
+        void  *enc = NULL;
+        size_t esz = 0;
+        double t_enc = now_s();
+        int    erc = yapf_encode(&img, &enc, &esz);
+        t_enc = now_s() - t_enc;
+        if (erc != YAPF_OK) { fprintf(stderr, "yapf: cannot encode %s\n", path); stbi_image_free(px); free(src); rc = 1; continue; }
+
+        yapf_image_t *chk = yapf_load_memory(enc, esz);
+        int lossless = chk && memcmp(chk->pixels, px, (size_t)w * h * ch) == 0;
+        yapf_free(chk);
+
+        double t_src, t_one, t_all;
+        int dw, dh, dc;
+        YAPF_TIME_BEST(t_src, stbi_image_free(stbi_load_from_memory(src, (int)fsz, &dw, &dh, &dc, 0)));
+        YAPF_TIME_BEST(t_one, yapf_free(yapf_load_memory(enc, esz)));
+        YAPF_TIME_BEST(t_all, yapf_free(yapf_load_memory_mt(enc, esz, 0)));
+
+        double raw = (double)w * h * ch;
+        char a[32], b[32], c[32];
+        static const char *chn[] = { "", "gray", "gray+alpha", "RGB", "RGBA" };
+        printf("%s  (%d x %d, %s)\n", path, w, h, chn[ch]);
+        printf("  %-5s %10s\n", "raw", fmt_kb(raw, c));
+        printf("  %-5s %10s  %5.1f%% of raw   decode %8.3f ms\n", ext_name(path), fmt_kb((double)fsz, a),
+               100.0 * fsz / raw, t_src * 1e3);
+        printf("  %-5s %10s  %5.1f%% of raw   decode %8.3f ms   %.1fx faster, %.0f%% of the %s size\n",
+               "YAPF", fmt_kb((double)esz, b), 100.0 * esz / raw, t_one * 1e3,
+               t_src / t_one, 100.0 * esz / fsz, ext_name(path));
+        printf("  YAPF on all cores: decode %.3f ms (%.1f GB/s), encode %.0f ms, %s\n\n",
+               t_all * 1e3, raw / t_all / 1e9, t_enc * 1e3,
+               lossless ? "lossless: yes" : "LOSSLESS CHECK FAILED");
+        if (!lossless) rc = 1;
+        tot_src += (double)fsz; tot_yapf += (double)esz; tot_src_t += t_src; tot_yapf_t += t_one;
+        yapf_free_buffer(enc);
+        stbi_image_free(px);
+        free(src);
+    }
+    if (n > 1 && tot_yapf_t > 0) {
+        char a[32], b[32];
+        printf("Total: originals %s, YAPF %s (%.0f%%); decoding %.1fx faster on one core\n",
+               fmt_kb(tot_src, a), fmt_kb(tot_yapf, b), 100.0 * tot_yapf / tot_src, tot_src_t / tot_yapf_t);
+    }
+    return rc;
+}
+
 static void usage(void) {
     fprintf(stderr,
         "usage: yapf <input> <output> [options]   convert (formats by extension)\n"
         "       yapf info <file.yapf>              show header information\n"
         "       yapf bench <file.yapf>             time decoding\n"
         "       yapf thumbnail <in.yapf> <out.png> [size]   preview, default 256 px\n"
+        "       yapf compare <image.png> [more...]  size and speed vs the original format\n"
         "\n"
         "reads:  .yapf .png .jpg .bmp .tga .gif .psd .pnm .hdr\n"
         "writes: .yapf .png .jpg .bmp .tga\n"
@@ -270,6 +378,7 @@ static void usage(void) {
 int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[1], "info") == 0)  return cmd_info(argv[2]);
     if (argc == 3 && strcmp(argv[1], "bench") == 0) return cmd_bench(argv[2]);
+    if (argc >= 3 && strcmp(argv[1], "compare") == 0) return cmd_compare(argc - 2, argv + 2);
     if ((argc == 4 || argc == 5) && strcmp(argv[1], "thumbnail") == 0)
         return cmd_thumbnail(argv[2], argv[3], argc == 5 ? atoi(argv[4]) : 256);
     if (argc < 3) { usage(); return 2; }

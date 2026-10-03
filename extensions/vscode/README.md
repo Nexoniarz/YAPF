@@ -24,4 +24,11 @@ Decoding runs in plain JavaScript inside the preview; no native code.
   code --install-extension yapf-preview-1.0.0.vsix
   ```
 
-Works in VS Code, VSCodium and other VS Code–based editors (1.75+).
+Should work in VS Code 1.75+ and VS Code–based editors such as VSCodium.
+
+## Status
+
+The `.vsix` packages cleanly, and the preview code was tested in a browser
+engine (headless Chromium) with real files: correct pixels, mip picker,
+error message for corrupt files.  **It has not yet been run inside VS Code
+itself.**

@@ -94,6 +94,9 @@ def _find_library():
             lib.yapf_load_memory_mt.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_int]
             lib.yapf_free.argtypes = [ctypes.POINTER(_CImage)]
             lib.yapf_save.argtypes = [ctypes.c_char_p, ctypes.POINTER(_CImage)]
+            lib.yapf_encode.argtypes = [ctypes.POINTER(_CImage), ctypes.POINTER(ctypes.c_void_p),
+                                        ctypes.POINTER(ctypes.c_size_t)]
+            lib.yapf_free_buffer.argtypes = [ctypes.c_void_p]
             return lib
         except (OSError, AttributeError):
             continue
@@ -124,15 +127,20 @@ def _c_decode(data):
         _lib.yapf_free(p)
 
 
-def _c_save(path, img):
+def _c_encode(img):
     bufs = [ctypes.create_string_buffer(m, len(m)) for m in img.mips]
     ptrs = (ctypes.POINTER(ctypes.c_uint8) * len(bufs))(
         *[ctypes.cast(b, ctypes.POINTER(ctypes.c_uint8)) for b in bufs])
     c = _CImage(img.width, img.height, img.channels, img.gpu_format, img.flags,
                 len(bufs), ptrs[0], ptrs)
-    rc = _lib.yapf_save(os.fsencode(path), ctypes.byref(c))
+    data, size = ctypes.c_void_p(), ctypes.c_size_t()
+    rc = _lib.yapf_encode(ctypes.byref(c), ctypes.byref(data), ctypes.byref(size))
     if rc != 0:
-        raise YapfError("yapf_save failed with code %d" % rc)
+        raise YapfError("yapf_encode failed with code %d" % rc)
+    try:
+        return ctypes.string_at(data, size.value)
+    finally:
+        _lib.yapf_free_buffer(data)
 
 
 # ── pure-Python fallback decoder (numpy) ──────────────────────────────
@@ -280,9 +288,9 @@ def load(path):
         return decode(f.read())
 
 
-def save(path, img):
-    """Encode an Image (or anything with width/height/channels/pixels) to a
-    .yapf file.  Needs the C library."""
+def encode(img):
+    """Encode an Image (or anything with width/height/channels/pixels) to
+    YAPF bytes.  Needs the C library."""
     if not _lib:
         raise YapfError("saving .yapf needs the YAPF native library, which was not found "
                         "for this platform; see https://github.com/Nexoniarz/YAPF#python")
@@ -291,20 +299,14 @@ def save(path, img):
     expected = img.width * img.height * img.channels
     if len(img.pixels) != expected:
         raise YapfError("expected %d pixel bytes, got %d" % (expected, len(img.pixels)))
-    _c_save(path, img)
+    return _c_encode(img)
 
 
-def encode(img):
-    """Encode an Image to YAPF bytes.  Needs the C library."""
-    import tempfile
-    fd, tmp = tempfile.mkstemp(suffix=".yapf")
-    os.close(fd)
-    try:
-        save(tmp, img)
-        with open(tmp, "rb") as f:
-            return f.read()
-    finally:
-        os.remove(tmp)
+def save(path, img):
+    """Encode an Image to a .yapf file.  Needs the C library."""
+    data = encode(img)
+    with open(path, "wb") as f:
+        f.write(data)
 
 
 if __name__ == "__main__":

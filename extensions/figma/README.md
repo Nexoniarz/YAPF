@@ -30,3 +30,10 @@ node build.js
 ```
 
 Figma limits images to 4096 × 4096; larger `.yapf` files report an error.
+
+## Status
+
+The plugin UI was tested in a browser engine (headless Chromium) with a
+simulated Figma main thread: import hands Figma a pixel-exact PNG, and
+export downloads a pixel-exact `.yapf`.  `code.js` is syntax-checked.
+**It has not yet been run inside Figma itself.**
