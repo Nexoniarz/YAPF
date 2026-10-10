@@ -14,10 +14,17 @@ encoder does the hard work, so the decoder only follows instructions.
   and natural textures — the price of having no entropy coder.
 - **Made for games and tools too**: mipmaps, GPU format hint, sRGB /
   premultiplied flags, and random access to 64×64 tiles.
+- **A real texture format (YAPF 2)**: GPU-ready BC1–BC7 / BC6H / ETC2 /
+  ASTC blocks, 16-bit and float pixels, cubemaps, arrays and volumes,
+  channel meanings (normal X/Y, roughness, AO, …), coverage-preserving
+  mips, small-mips-first streaming, per-tile checksums, notes and
+  animation — see [Textures](#textures-yapf-2).
 - **Tiny and portable**: two C99 files, no dependencies.  Plus a CLI, Python,
   JavaScript and plugins for the tools you already use.
 
-This is **YAPF version 1**, the first stable format.
+Two format versions: **version 1** (an 8-bit image, the first stable
+format) and **version 2** (the texture container).  Plain 8-bit images are
+still written as version 1, so every existing YAPF reader keeps working.
 
 ---
 
@@ -67,7 +74,64 @@ yapf compare photo.png ui.png         # size and decode speed vs the original fo
 ```
 
 Options when writing `.yapf`: `--mips`, `--linear` (pixels are not sRGB),
-`--premult` (alpha is premultiplied).
+`--premult` (alpha is premultiplied), and the texture options below.
+
+---
+
+## Textures (YAPF 2)
+
+Version 2 turns YAPF into a texture container for engines, designed our own
+way rather than copied from KTX2 or DDS (the design and the full
+specification are in [docs/FORMAT.md](docs/FORMAT.md)):
+
+| Need | YAPF 2 |
+| :--- | :----- |
+| **GPU-compressed payloads** | BC1, BC2, BC3, BC4, BC5, BC6H, BC7, ETC2 / EAC and ASTC 4×4–12×12 blocks, stored as the GPU takes them.  Built-in encoders for BC1, BC3, BC4, BC5, BC7 and BC6H; or bring blocks from your own encoder. |
+| **More than 8 bits** | lossless 16-bit, half and float pixels, coded as byte planes with the same fast machinery |
+| **Cubes, arrays, volumes** | cubemaps and cube arrays (reflection probes, skies), texture arrays (terrain layers), 3D textures (colour-grading LUTs) |
+| **Channel meaning** | per channel: normal X/Y/Z, roughness, metalness, AO, height, opacity, …; OpenGL or DirectX normal convention; linear channels inside sRGB images |
+| **Streaming** | small mips are stored first: a file prefix is a complete low-resolution texture (`yapf info` prints the prefix sizes); single 64 × 64 tiles decode on their own for virtual texturing |
+| **Alpha-tested mips** | `--coverage REF` keeps fences and foliage from thinning out with distance; the filter used is recorded |
+| **Entropy coding (optional)** | `--entropy`: shared per-surface Huffman code books with a neighbourhood context — about 10 % smaller photos, about 3× smaller GPU blocks on disk; tiles stay independent |
+| **Metadata** | notes (author, licence, source, tool, ICC profile, orientation, DPI, HDR light levels, your own tags), colour primaries and transfer (sRGB, Display P3, BT.2020, PQ, HLG, …) |
+| **Integrity** | yapf-sum checksums on the header, tables and every tile; *needs* bits make an older decoder refuse cleanly what it cannot read |
+| **Animation** | frames with per-frame durations and a loop count |
+
+```sh
+yapf albedo.png albedo.yapf --format bc7 --mips               # GPU-ready colour
+yapf normal.png normal.yapf --format bc5 --mips --normal dx   # normal map, DirectX Y
+yapf orm.png orm.yapf --map ao,rough,metal --linear --mips    # packed masks
+yapf foliage.png foliage.yapf --format bc7 --coverage 128     # alpha-tested mips
+yapf sky.hdr sky.yapf --format bc6h --mips                    # HDR, no RGBM tricks
+yapf sky.hdr sky_lossless.yapf                                # lossless half float
+yapf pack cube px.png nx.png py.png ny.png pz.png nz.png probe.yapf --mips
+yapf pack array grass.png rock.png sand.png terrain.yapf --format bc7 --mips
+yapf pack volume lut_00.png lut_01.png ... grading.yapf --linear
+yapf pack anim f0.png f1.png f2.png fx.yapf --frame-ms 50
+yapf albedo.png albedo.yapf --entropy --author "Keel" --license CC-BY-4.0
+yapf info albedo.yapf       # everything in the header, notes, stream prefix sizes
+yapf verify albedo.yapf     # check every checksum
+yapf probe.yapf face2.png --face 2 --mip 1    # export one surface
+```
+
+In C:
+
+```c
+int err;
+yapf_texture_t *t = yapf_tex_load("albedo.yapf", 0, 0, &err);
+for (uint32_t m = 0; m < t->mip_levels; m++) {
+    uint32_t s = yapf_tex_surface(t, 0, 0, 0, m), w, h;
+    yapf_tex_mip_size(t, m, &w, &h, NULL);
+    if (t->payload == YAPF_PAYLOAD_BLOCKS)        /* e.g. YAPF_GPU_BC7 */
+        glCompressedTexImage2D(GL_TEXTURE_2D, m, gl_format(t->format, t->flags),
+                               w, h, 0, (GLsizei)yapf_tex_surface_bytes(t, m), t->data[s]);
+}
+yapf_tex_free(t);
+```
+
+The language bindings and the JavaScript port speak version 1; the C
+library's v1 functions also read 8-bit version 2 files (2D, cube face 0,
+array layer 0), so plugins built on them open those too.
 
 ---
 
@@ -198,6 +262,47 @@ void yapf_free(yapf_image_t *img);
 ```
 Releases memory returned by the loaders.  Passing `NULL` is safe.
 
+### Textures (version 2)
+
+```c
+yapf_texture_t *yapf_tex_load(const char *file, int flags, int threads, int *err);
+yapf_texture_t *yapf_tex_load_memory(const void *buf, size_t size, int flags, int threads, int *err);
+int  yapf_tex_save(const char *file, const yapf_texture_t *t, int flags);
+int  yapf_tex_encode(const yapf_texture_t *t, int flags, void **out, size_t *size);
+yapf_texture_t *yapf_tex_create(const yapf_texture_t *desc);   /* zeroed storage */
+void yapf_tex_free(yapf_texture_t *t);
+```
+A texture describes its shape (width, height, depth, layers, frames,
+cube / volume, mips), storage (pixels with u8 / u16 / half / float samples,
+or GPU blocks), meaning (channel map, linear mask, normal convention,
+primaries, transfer, mip filter, alpha reference) and holds `data[s]` per
+surface `s = yapf_tex_surface(t, frame, layer, face, mip)`.  Load flag
+`YAPF_LOAD_TRUST` skips checksum checks; encode flag `YAPF_ENC_ENTROPY`
+allows the entropy stage.
+
+```c
+yapf_texture_t *yapf_tex_open(const void *buf, size_t avail, int flags, int *err);
+uint64_t yapf_tex_stream_bytes(const yapf_texture_t *t, uint32_t first_mip);
+int  yapf_tex_decode_surface(yapf_texture_t *t, const void *buf, size_t avail, uint32_t s, int threads);
+int  yapf_tex_decode_tile(const yapf_texture_t *t, const void *buf, size_t avail, uint32_t s,
+                          uint32_t tx, uint32_t ty, uint32_t slice, void *out, size_t stride,
+                          uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
+```
+Streaming and virtual texturing: open a file from its first bytes, ask how
+many bytes hold mip *m* and smaller, decode surfaces as their bytes arrive
+(`YAPF_ERR_TRUNCATED` until then), or decode single tiles.
+
+```c
+int yapf_tex_build_mips(yapf_texture_t *t, uint32_t levels, uint8_t alpha_ref);
+int yapf_tex_compress(const yapf_texture_t *src, uint8_t format, yapf_texture_t **out);
+int yapf_blocks_decode(uint8_t format, const void *blocks, uint32_t w, uint32_t h, void *out);
+int yapf_tex_add_note(yapf_texture_t *t, const char tag[4], const void *data, uint32_t size);
+const yapf_note_t *yapf_tex_find_note(const yapf_texture_t *t, const char tag[4]);
+```
+Mip chains (linear-light sRGB, optional coverage preservation), the
+built-in BCn encoders, BC1–BC7 decoding for previews, and notes.  The
+complete list, with sizes and helpers, is in [`yapf.h`](yapf.h).
+
 ### Return codes
 
 | Constant           | Value | Meaning                              |
@@ -206,6 +311,10 @@ Releases memory returned by the loaders.  Passing `NULL` is safe.
 | `YAPF_ERR_INVALID` | –1    | NULL or logically invalid argument   |
 | `YAPF_ERR_IO`      | –2    | File could not be opened or written  |
 | `YAPF_ERR_OOM`     | –3    | Out of memory                        |
+| `YAPF_ERR_CORRUPT` | –4    | Corrupt or not a YAPF file           |
+| `YAPF_ERR_UNSUPPORTED` | –5 | Needs a feature this decoder lacks  |
+| `YAPF_ERR_CHECKSUM` | –6   | A checksum does not match (v2)       |
+| `YAPF_ERR_TRUNCATED` | –7  | The data is not (yet) all there      |
 
 ### Channel constants
 
@@ -256,7 +365,8 @@ domain [stb](https://github.com/nothings/stb) headers in `third_party/`.
 7. **Independent tiles** — any tile can be decoded on its own, in any order,
    on any thread.
 
-The complete specification is the comment at the top of [`yapf.h`](yapf.h):
+The version 1 specification is the comment at the top of [`yapf.h`](yapf.h);
+version 2 (textures) is specified in [docs/FORMAT.md](docs/FORMAT.md).  Version 1:
 
 ```
 HEADER (20 bytes)   "YAPF", version 1, channels, GPU hint, mip count,
@@ -273,7 +383,7 @@ TILE (64×64)        header byte: stored raw, or constant-plane mask + colour tr
 ## Testing
 
 ```sh
-make test                      # C suite: 786 checks, plus JavaScript if node is installed
+make test                      # C suite: 2631 checks, plus JavaScript if node is installed
 node bindings/js/test.js       # JavaScript: round-trips, sample file, corrupt input
 ```
 
@@ -286,6 +396,16 @@ What has been verified:
   C++, and under AddressSanitizer, UndefinedBehaviorSanitizer and
   ThreadSanitizer;
 - thousands of corrupted and truncated files are rejected without crashing;
+- version 2: lossless round-trips of u8 / u16 / half / float pixels with 1–4
+  channels, with and without entropy coding; cubes, cube arrays, arrays,
+  volumes and animations with notes and every description field; GPU block
+  payloads; checksum, needs-bit and truncation handling; streaming from file
+  prefixes and single-tile decoding; BCn encoder quality; linear-light and
+  coverage-preserving mips; fuzzing of entropy-coded and packed-block files;
+- the BC1–BC7 decoders were checked against an independent reference decoder
+  (bcdec) on 300,000 random blocks: BC6H and BC7 bit-exact, BC1–BC5 within
+  the ±1 rounding the formats allow (a development check, not part of
+  `make test`);
 - every language binding runs its example; JavaScript, Python, C++, C#,
   Rust, Go, Java and Lua re-encode the sample to byte-identical output;
 - the GIMP plugin in GIMP 3.0.8 and the Blender extension in Blender 5.1;
@@ -293,14 +413,20 @@ What has been verified:
 
 **Not yet verified:** running on a Mac (macOS builds are cross-compiled
 only), Windows on ARM, and running inside Photoshop, VS Code, Figma or a
-live Dolphin / GNOME file manager.
+live Dolphin / GNOME file manager.  The version 2 code has been run on
+Linux x64 (with and without SIMD, as C and C++, under ASan, UBSan and
+TSan); its NEON path is compiled for ARM64 but has not been run yet, and
+the Windows builds have not been rerun.  ETC2 / EAC / ASTC blocks are
+stored and loaded, but there is no built-in encoder or preview decoder
+for them.
 
 ---
 
 ## Project layout
 
 ```
-yapf.h, yapf.c          the library (format spec in yapf.h)
+yapf.h, yapf.c          the library (v1 spec in yapf.h)
+docs/FORMAT.md          the full format specification, version 2
 tools/yapf_cli.c        the `yapf` command-line tool
 tools/build_release.sh  builds every download for all platforms
 tests/test_yapf.c       C test suite
