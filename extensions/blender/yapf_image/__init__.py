@@ -33,30 +33,61 @@ from . import yapf
 
 # ── conversion helpers ────────────────────────────────────────────────
 
-def load_image(filepath):
-    """Read a .yapf file into a packed bpy.types.Image."""
-    img = yapf.load(filepath)
+def _set_colorspace(bimg, names):
+    for n in names:                                   # names differ between versions
+        try:
+            bimg.colorspace_settings.name = n
+            return
+        except TypeError:
+            continue
+
+
+def _read(filepath):
+    """(rgba float32 h×w×4, has_alpha, flags, float_data, texture or None)."""
+    if yapf.backend() == "c" and getattr(yapf._lib, "has_textures", False):
+        tex = yapf.load_texture(filepath)             # every v1 / v2 file
+        rgba = tex.rgba_float()                       # frame 0, layer 0, face +X, mip 0
+        if tex.normal & 3 == 2:                       # DirectX (-Y) → Blender's OpenGL (+Y)
+            rgba[..., 1] = 1.0 - rgba[..., 1]
+        if tex.normal & 4 or (tex.normal and tex.channels == 2):     # XY: rebuild Z
+            x, y = rgba[..., 0] * 2.0 - 1.0, rgba[..., 1] * 2.0 - 1.0
+            rgba[..., 2] = (np.sqrt(np.clip(1.0 - x * x - y * y, 0.0, 1.0)) + 1.0) * 0.5
+        alpha = tex.channels in (2, 4) and not tex.normal
+        wide = tex.is_hdr or (tex.payload == yapf.PAYLOAD_PIXELS and tex.sample == yapf.SAMPLE_U16)
+        return rgba, alpha, tex.flags, wide, tex
+    img = yapf.load(filepath)                         # pure-Python decoder: v1 only
     w, h, ch = img.width, img.height, img.channels
     src = np.frombuffer(img.pixels, dtype=np.uint8).reshape(h, w, ch).astype(np.float32) / 255.0
     rgba = np.ones((h, w, 4), dtype=np.float32)
-    if ch >= 3:
-        rgba[..., :3] = src[..., :3]
-    else:
-        rgba[..., :3] = src[..., :1]
+    rgba[..., :3] = src[..., :3] if ch >= 3 else src[..., :1]
     if ch in (2, 4):
         rgba[..., 3] = src[..., ch - 1]
+    return rgba, ch in (2, 4), img.flags, False, None
+
+
+def load_image(filepath):
+    """Read a .yapf file into a packed bpy.types.Image.  16-bit, half,
+    float and BC6H textures become float images (packed as EXR so nothing
+    is lost); GPU blocks are decoded."""
+    rgba, alpha, flags, wide, tex = _read(filepath)
+    h, w = rgba.shape[:2]
 
     name = os.path.basename(filepath)
-    bimg = bpy.data.images.new(name, w, h, alpha=ch in (2, 4))
-    bimg.colorspace_settings.name = "sRGB" if img.flags & yapf.FLAG_SRGB else "Non-Color"
-    if img.flags & yapf.FLAG_PREMULT_ALPHA:
+    bimg = bpy.data.images.new(name, w, h, alpha=alpha, float_buffer=wide)
+    if tex is not None and tex.is_hdr:
+        _set_colorspace(bimg, ("Linear Rec.709", "Linear"))
+    elif flags & yapf.FLAG_SRGB:
+        _set_colorspace(bimg, ("sRGB",))
+    else:
+        _set_colorspace(bimg, ("Non-Color",))
+    if flags & yapf.FLAG_PREMULT_ALPHA:
         bimg.alpha_mode = "PREMUL"
     bimg.pixels.foreach_set(rgba[::-1].ravel())          # Blender rows go bottom-up
-    bimg.file_format = "PNG"
+    bimg.file_format = "OPEN_EXR" if wide else "PNG"
     bimg.pack()                                          # keep it inside the .blend
     bimg.use_fake_user = True                            # …even before anything uses it
     bimg["yapf_source"] = filepath
-    bimg["yapf_alpha"] = ch in (2, 4)
+    bimg["yapf_alpha"] = alpha
     return bimg
 
 

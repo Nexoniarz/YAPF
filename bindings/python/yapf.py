@@ -1,5 +1,5 @@
 """
-yapf.py — Python bindings for YAPF v1 images.
+yapf.py — Python bindings for YAPF images (v1) and textures (v2).
 
 Copyright 2026 Nexoniarz — Apache License 2.0.
 
@@ -7,6 +7,11 @@ Copyright 2026 Nexoniarz — Apache License 2.0.
     img = yapf.load("texture.yapf")          # or yapf.decode(data)
     img.width, img.height, img.channels      # pixels: bytes, row-major
     yapf.save("out.yapf", img)                # or yapf.encode(img) -> bytes
+
+    tex = yapf.load_texture("albedo.yapf")    # any v1 / v2 file (C library)
+    tex.payload, tex.format, tex.sample       # GPU blocks, 16-bit, float, ...
+    raw = tex.surface(mip=0)                  # bytes as stored (blocks or samples)
+    rgba = tex.rgba_float()                   # numpy float32 (h, w, 4) for display
 
 Uses the C library through ctypes when one can be found (fast, can
 encode); otherwise falls back to a pure-Python decoder that needs numpy
@@ -26,12 +31,22 @@ import platform
 import struct
 import sys
 
-__all__ = ["Image", "load", "save", "decode", "encode", "backend",
+__all__ = ["Image", "Texture", "load", "save", "decode", "encode", "backend",
+           "load_texture", "decode_texture",
            "GPU_RGBA8", "GPU_RGB8", "GPU_RG8", "GPU_R8", "GPU_SRGB8_A8", "GPU_SRGB8",
            "FLAG_PREMULT_ALPHA", "FLAG_SRGB", "YapfError"]
 
 GPU_RGBA8, GPU_RGB8, GPU_RG8, GPU_R8, GPU_SRGB8_A8, GPU_SRGB8 = range(6)
-FLAG_PREMULT_ALPHA, FLAG_SRGB = 1, 2
+GPU_BC1, GPU_BC2, GPU_BC3, GPU_BC4, GPU_BC4_SNORM, GPU_BC5, GPU_BC5_SNORM = range(0x40, 0x47)
+GPU_BC6H, GPU_BC6H_SF, GPU_BC7 = 0x47, 0x48, 0x49
+FLAG_PREMULT_ALPHA, FLAG_SRGB, FLAG_COVERAGE = 1, 2, 4
+PAYLOAD_PIXELS, PAYLOAD_BLOCKS = 0, 1
+SAMPLE_U8, SAMPLE_U16, SAMPLE_F16, SAMPLE_F32 = 0, 1, 2, 3
+SHAPE_2D, SHAPE_CUBE, SHAPE_VOLUME = 0, 1, 2
+
+_ERRORS = {-1: "invalid argument", -2: "cannot read the file", -3: "out of memory",
+           -4: "corrupt or not a YAPF file", -5: "needs a feature this library does not have",
+           -6: "damaged: a checksum does not match", -7: "the file is truncated"}
 
 
 class YapfError(Exception):
@@ -70,6 +85,26 @@ class _CImage(ctypes.Structure):
                 ("mips", ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)))]
 
 
+class _CNote(ctypes.Structure):
+    _fields_ = [("tag", ctypes.c_char * 4), ("size", ctypes.c_uint32),
+                ("data", ctypes.POINTER(ctypes.c_uint8))]
+
+
+class _CTexture(ctypes.Structure):
+    _fields_ = [("width", ctypes.c_uint32), ("height", ctypes.c_uint32), ("depth", ctypes.c_uint32),
+                ("layers", ctypes.c_uint16), ("frames", ctypes.c_uint16),
+                ("shape", ctypes.c_uint8), ("mip_levels", ctypes.c_uint8),
+                ("payload", ctypes.c_uint8), ("format", ctypes.c_uint8),
+                ("sample", ctypes.c_uint8), ("channels", ctypes.c_uint8), ("flags", ctypes.c_uint8),
+                ("channel_map", ctypes.c_uint8 * 4), ("linear_mask", ctypes.c_uint8),
+                ("normal", ctypes.c_uint8), ("primaries", ctypes.c_uint8), ("transfer", ctypes.c_uint8),
+                ("mip_filter", ctypes.c_uint8), ("alpha_ref", ctypes.c_uint8),
+                ("loop_count", ctypes.c_uint16),
+                ("frame_us", ctypes.POINTER(ctypes.c_uint32)),
+                ("note_count", ctypes.c_uint32), ("notes", ctypes.POINTER(_CNote)),
+                ("data", ctypes.POINTER(ctypes.c_void_p)), ("internal_", ctypes.c_void_p)]
+
+
 def _platform_dir():
     machine = platform.machine().lower()
     arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
@@ -97,6 +132,20 @@ def _find_library():
             lib.yapf_encode.argtypes = [ctypes.POINTER(_CImage), ctypes.POINTER(ctypes.c_void_p),
                                         ctypes.POINTER(ctypes.c_size_t)]
             lib.yapf_free_buffer.argtypes = [ctypes.c_void_p]
+            try:                                    # version 2 (texture) API
+                T = ctypes.POINTER(_CTexture)
+                lib.yapf_tex_load_memory.restype = T
+                lib.yapf_tex_load_memory.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_int,
+                                                     ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+                lib.yapf_tex_free.argtypes = [T]
+                lib.yapf_tex_surface_bytes.restype = ctypes.c_size_t
+                lib.yapf_tex_surface_bytes.argtypes = [T, ctypes.c_uint32]
+                lib.yapf_tex_to_rgba8.argtypes = [T, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+                lib.yapf_blocks_decode.argtypes = [ctypes.c_uint8, ctypes.c_void_p, ctypes.c_uint32,
+                                                   ctypes.c_uint32, ctypes.c_void_p]
+                lib.has_textures = True
+            except AttributeError:                  # an older library: v1 only
+                lib.has_textures = False
             return lib
         except (OSError, AttributeError):
             continue
@@ -115,7 +164,7 @@ def _c_decode(data):
     data = bytes(data)
     p = _lib.yapf_load_memory_mt(data, len(data), 0)
     if not p:
-        raise YapfError("not a valid YAPF v1 file")
+        raise YapfError(_why(data))
     try:
         c = p.contents
         mips = []
@@ -157,6 +206,9 @@ def _py_decode(data):
     b = np.frombuffer(bytes(data), dtype=np.uint8)
     if len(b) < 20 or bytes(b[:4]) != b"YAPF":
         raise YapfError("not a YAPF file")
+    if b[4] == 2:
+        raise YapfError("this is a YAPF 2 file; reading it needs the YAPF native library, "
+                        "which was not found (the pure-Python decoder reads version 1 only)")
     if b[4] != 1:
         raise YapfError("unsupported YAPF version %d" % b[4])
     ch, gpu, mip_levels, flags = int(b[5]), int(b[6]), int(b[7]), int(b[8])
@@ -273,6 +325,127 @@ def _py_tile(np, b, p, end, tw, th, ch, bad):
         R, G = B + co, cg + t
     out = [R & 255, G & 255, B & 255] + ([planes[3].astype(np.int64)] if ch == 4 else [])
     return np.stack(out, axis=-1).astype(np.uint8)
+
+
+# ── textures (version 2, C library) ──────────────────────────────────
+
+def _why(data):
+    """Why `decode` could not read data, in words."""
+    if len(data) < 5 or data[:4] != b"YAPF":
+        return "not a YAPF file"
+    if data[4] not in (1, 2):
+        return "YAPF format version %d is newer than this library" % data[4]
+    if _lib and getattr(_lib, "has_textures", False):
+        err = ctypes.c_int(0)
+        p = _lib.yapf_tex_load_memory(data, len(data), 0, 1, ctypes.byref(err))
+        if p:
+            _lib.yapf_tex_free(p)
+            return ("this is a YAPF 2 texture (GPU blocks, 16-bit / float or a volume) "
+                    "that yapf.decode cannot return as 8-bit pixels; use yapf.load_texture")
+        return _ERRORS.get(err.value, "error %d" % err.value)
+    if data[4] == 2:
+        return "YAPF 2 files need the YAPF native library (not found)"
+    return "corrupt YAPF file"
+
+
+class Texture:
+    """A decoded YAPF texture (version 1 or 2).  Description fields mirror
+    yapf_texture_t; `surfaces[s]` holds the bytes of surface s as stored
+    (GPU blocks, or samples in native byte order), numbered
+    s = ((frame * layers + layer) * faces + face) * mip_levels + mip."""
+
+    def __init__(self, c, lib):
+        for f, _ in _CTexture._fields_:
+            if f not in ("frame_us", "notes", "data", "internal_", "channel_map", "note_count"):
+                setattr(self, f, getattr(c, f))
+        self.channel_map = list(c.channel_map)
+        self.faces = 6 if c.shape == SHAPE_CUBE else 1
+        self.frame_us = [c.frame_us[i] for i in range(c.frames)] if c.frame_us else []
+        self.notes = [(c.notes[i].tag.decode("latin-1"), ctypes.string_at(c.notes[i].data, c.notes[i].size))
+                      for i in range(c.note_count)]
+        count = c.frames * c.layers * self.faces * c.mip_levels
+        self.surfaces = [ctypes.string_at(c.data[s], lib.yapf_tex_surface_bytes(ctypes.byref(c), s % c.mip_levels))
+                         for s in range(count)]
+
+    def surface_index(self, frame=0, layer=0, face=0, mip=0):
+        return ((frame * self.layers + layer) * self.faces + face) * self.mip_levels + mip
+
+    def surface(self, frame=0, layer=0, face=0, mip=0):
+        return self.surfaces[self.surface_index(frame, layer, face, mip)]
+
+    def mip_size(self, mip=0):
+        d = max(1, self.depth >> mip) if self.shape == SHAPE_VOLUME else 1
+        return max(1, self.width >> mip), max(1, self.height >> mip), d
+
+    @property
+    def is_hdr(self):
+        """Float / half samples or BC6H blocks: values may go above 1."""
+        if self.payload == PAYLOAD_BLOCKS:
+            return self.format in (GPU_BC6H, GPU_BC6H_SF)
+        return self.sample in (SAMPLE_F16, SAMPLE_F32)
+
+    def rgba_float(self, frame=0, layer=0, face=0, mip=0, slice=0):
+        """One image as numpy float32 (height, width, 4), rows top to bottom:
+        8 / 16-bit scaled to 0..1 (still in their stored colour space),
+        floats as stored, GPU blocks decoded.  Needs numpy."""
+        import numpy as np
+        w, h, d = self.mip_size(mip)
+        raw = self.surface(frame, layer, face, mip)
+        raw = raw[len(raw) // d * slice:len(raw) // d * (slice + 1)]
+        out = np.ones((h, w, 4), dtype=np.float32)
+        if self.payload == PAYLOAD_BLOCKS:
+            hdr = self.format in (GPU_BC6H, GPU_BC6H_SF)
+            buf = ctypes.create_string_buffer(w * h * (6 if hdr else 4))
+            rc = _lib.yapf_blocks_decode(self.format, raw, w, h, buf)
+            if rc != 0:
+                raise YapfError("GPU block format 0x%02x cannot be decoded here" % self.format)
+            if hdr:
+                out[..., :3] = np.frombuffer(buf.raw, dtype=np.float16).reshape(h, w, 3)
+            else:
+                out[...] = np.frombuffer(buf.raw, dtype=np.uint8).reshape(h, w, 4) / 255.0
+                if self.channels == 3:
+                    out[..., 3] = 1.0
+            return out
+        dt = {SAMPLE_U8: np.uint8, SAMPLE_U16: np.uint16, SAMPLE_F16: np.float16, SAMPLE_F32: np.float32}[self.sample]
+        ch = self.channels
+        src = np.frombuffer(raw, dtype=dt).reshape(h, w, ch).astype(np.float32)
+        if self.sample == SAMPLE_U8:
+            src /= 255.0
+        elif self.sample == SAMPLE_U16:
+            src /= 65535.0
+        out[..., :3] = src[..., :3] if ch >= 3 else src[..., :1]
+        if ch in (2, 4):
+            out[..., 3] = src[..., ch - 1]
+        return out
+
+    def __repr__(self):
+        w, h, d = self.mip_size(0)
+        return "<yapf.Texture %dx%d%s, %d mip(s), %s>" % (
+            w, h, "x%d" % d if d > 1 else "", self.mip_levels,
+            "blocks 0x%02x" % self.format if self.payload == PAYLOAD_BLOCKS
+            else "%d ch %s" % (self.channels, ["u8", "u16", "f16", "f32"][self.sample]))
+
+
+def decode_texture(data, verify=True):
+    """Decode any YAPF file (v1 or v2) into a Texture.  Needs the C library."""
+    if not (_lib and getattr(_lib, "has_textures", False)):
+        raise YapfError("YAPF textures need the YAPF native library (version 2), which was not found")
+    data = bytes(data)
+    err = ctypes.c_int(0)
+    p = _lib.yapf_tex_load_memory(data, len(data), 0 if verify else 1, 0, ctypes.byref(err))
+    if not p:
+        raise YapfError(_why(data) if len(data) < 5 or data[:4] != b"YAPF"
+                        else _ERRORS.get(err.value, "error %d" % err.value))
+    try:
+        return Texture(p.contents, _lib)
+    finally:
+        _lib.yapf_tex_free(p)
+
+
+def load_texture(path, verify=True):
+    """Read and decode any .yapf file into a Texture."""
+    with open(path, "rb") as f:
+        return decode_texture(f.read(), verify)
 
 
 # ── public API ────────────────────────────────────────────────────────
