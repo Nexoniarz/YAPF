@@ -9,6 +9,12 @@ Both directions are pixel-exact: the plugin carries its own small PNG
 encoder/decoder instead of going through a canvas, which would alter
 semi-transparent pixels.
 
+Import reads every YAPF file, version 1 and 2.  8-bit images keep their
+exact pixels; GPU blocks (BC1–BC7, BC6H), 16-bit and float textures are
+converted to 8-bit for display (Figma images are 8-bit); cubes, arrays,
+volumes and animations bring their first image.  Damaged files are
+reported as such.
+
 ## Install (development plugin)
 
 1. Use the **Figma desktop app**.

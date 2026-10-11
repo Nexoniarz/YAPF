@@ -3,7 +3,10 @@
 
 #include <KIO/ThumbnailCreator>
 #include <KPluginFactory>
+#include <QFile>
 #include <QImage>
+
+#include <cstring>
 
 extern "C" {
 #include "yapf.h"
@@ -20,52 +23,50 @@ public:
 
     KIO::ThumbnailResult create(const KIO::ThumbnailRequest &request) override
     {
-        const QByteArray path = request.url().toLocalFile().toLocal8Bit();
-        yapf_image_t *img = yapf_load(path.constData());
-        if (!img) {
+        QFile file(request.url().toLocalFile());
+        if (!file.open(QIODevice::ReadOnly)) {
+            return KIO::ThumbnailResult::fail();
+        }
+        const QByteArray data = file.readAll();
+
+        // Version 1 and 2: read the tables, then decode only the mip we
+        // need (frame 0, layer 0, face 0, slice 0).
+        int err = 0;
+        yapf_texture_t *tex = yapf_tex_open(data.constData(), size_t(data.size()), 0, &err);
+        if (!tex) {
             return KIO::ThumbnailResult::fail();
         }
 
-        // Start from the smallest stored mip level that still covers the
-        // requested size; Qt scales the rest.
+        // The smallest stored mip that still covers the requested size;
+        // Qt scales the rest.
         const QSize want = request.targetSize();
-        int m = 0;
-        while (m + 1 < img->mip_levels &&
-               int(img->width >> (m + 1)) >= want.width() &&
-               int(img->height >> (m + 1)) >= want.height()) {
+        uint32_t m = 0, w = 0, h = 0;
+        while (m + 1 < tex->mip_levels) {
+            yapf_tex_mip_size(tex, m + 1, &w, &h, nullptr);
+            if (int(w) < want.width() || int(h) < want.height()) {
+                break;
+            }
             ++m;
         }
-        const int w = qMax(1, int(img->width >> m));
-        const int h = qMax(1, int(img->height >> m));
-        const uchar *px = img->mips[m];
+        yapf_tex_mip_size(tex, m, &w, &h, nullptr);
+        const uint32_t s = yapf_tex_surface(tex, 0, 0, 0, m);
 
-        QImage image;
-        switch (img->channels) {
-        case 1:
-            image = QImage(px, w, h, w, QImage::Format_Grayscale8).copy();
-            break;
-        case 2: {                                   // gray + alpha → RGBA
-            image = QImage(w, h, QImage::Format_RGBA8888);
-            for (int y = 0; y < h; ++y) {
-                const uchar *s = px + size_t(y) * w * 2;
-                uchar *d = image.scanLine(y);
-                for (int x = 0; x < w; ++x, s += 2, d += 4) {
-                    d[0] = d[1] = d[2] = s[0];
-                    d[3] = s[1];
-                }
+        QImage image(int(w), int(h), (tex->flags & YAPF_FLAG_PREMULT_ALPHA) ? QImage::Format_RGBA8888_Premultiplied
+                                                                            : QImage::Format_RGBA8888);
+        bool ok = !image.isNull() &&
+                  yapf_tex_decode_surface(tex, data.constData(), size_t(data.size()), s, 0) == YAPF_OK;
+        if (ok) {
+            // RGBA 8-bit rows (blocks decoded, 16-bit / float converted)
+            QByteArray rgba(int(size_t(w) * h * 4), Qt::Uninitialized);
+            ok = yapf_tex_to_rgba8(tex, s, 0, reinterpret_cast<uint8_t *>(rgba.data())) == YAPF_OK;
+            for (int y = 0; ok && y < int(h); ++y) {
+                memcpy(image.scanLine(y), rgba.constData() + size_t(y) * w * 4, size_t(w) * 4);
             }
-            break;
         }
-        case 3:
-            image = QImage(px, w, h, w * 3, QImage::Format_RGB888).copy();
-            break;
-        default:
-            image = QImage(px, w, h, w * 4,
-                           (img->flags & YAPF_FLAG_PREMULT_ALPHA) ? QImage::Format_RGBA8888_Premultiplied
-                                                                  : QImage::Format_RGBA8888).copy();
-            break;
+        yapf_tex_free(tex);
+        if (!ok) {
+            return KIO::ThumbnailResult::fail();
         }
-        yapf_free(img);
 
         if (image.width() > want.width() || image.height() > want.height()) {
             image = image.scaled(want, Qt::KeepAspectRatio, Qt::SmoothTransformation);

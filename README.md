@@ -129,9 +129,13 @@ for (uint32_t m = 0; m < t->mip_levels; m++) {
 yapf_tex_free(t);
 ```
 
-The language bindings and the JavaScript port speak version 1; the C
-library's v1 functions also read 8-bit version 2 files (2D, cube face 0,
-array layer 0), so plugins built on them open those too.
+Every extension opens version 2 files: GIMP (at full 16-bit / float
+precision, faces and frames as layers), Blender (HDR as float images),
+KDE and Linux thumbnails, VS Code (with face / layer / frame / slice
+pickers), Figma and Photoshop.  The Python binding (`yapf.load_texture`)
+and the JavaScript port (`YAPF.decodeTexture`) read every texture; the
+other bindings wrap the v1 functions, which also read 8-bit version 2
+files (2D, cube face 0, array layer 0).
 
 ---
 
@@ -332,6 +336,7 @@ YAPF_CHANNELS_RGBA        4
 | System | Command | Output |
 | :----- | :------ | :----- |
 | Linux, macOS, BSD | `make` · `make test` · `sudo make install` | `build/`: `libyapf.a`, `libyapf.so` / `.dylib`, `yapf` |
+| NixOS / Nix | `nix-build` (or `nix-env -if .`) — see [extensions/linux](extensions/linux#nixos) | `result/`: `bin/yapf`, `lib/`, `include/`, MIME type, thumbnailer |
 | Linux, macOS (LLVM) | `./build.sh` | `dist/<platform>/` incl. macOS universal binaries |
 | Windows (LLVM) | `build.bat` | `dist\windows-x64\`, `dist\windows-arm64\`: `yapf.dll`, `yapf.lib`, `libyapf.a`, `yapf.exe` |
 | Windows (Visual Studio) | `cl /O2 /c yapf.c` and add `yapf.obj` to your project | |

@@ -601,6 +601,16 @@ int yapf_tex_compress(const yapf_texture_t *src, uint8_t format,
 int yapf_blocks_decode(uint8_t format, const void *blocks, uint32_t w, uint32_t h,
                        void *out);
 
+/*
+ * yapf_tex_to_rgba8 — one slice of a decoded surface as 8-bit RGBA for
+ * display (thumbnails, previews): gray is expanded, 16-bit is rounded to
+ * 8 bits, float and half are clamped to 0..1 and sRGB encoded (they are
+ * linear), GPU blocks are decoded.  out holds w × h × 4 bytes of that
+ * mip.  Returns YAPF_ERR_UNSUPPORTED for ETC2 / EAC / ASTC blocks.
+ */
+int yapf_tex_to_rgba8(const yapf_texture_t *tex, uint32_t surface, uint32_t slice,
+                      uint8_t *out);
+
 /* yapf-sum, the checksum used by version 2 files. */
 uint32_t yapf_checksum(const void *data, size_t size);
 

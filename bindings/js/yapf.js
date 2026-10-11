@@ -1,5 +1,5 @@
 /*
- * yapf.js — YAPF v1 encoder / decoder in plain JavaScript.
+ * yapf.js — YAPF encoder (v1) and decoder (v1 and v2) in plain JavaScript.
  *
  * Copyright 2026 Nexoniarz — Apache License 2.0.
  *
@@ -10,9 +10,14 @@
  *   const file = YAPF.encode(img);      // image → Uint8Array
  *   const rgba = YAPF.toRGBA(img);      // any channel count → RGBA pixels
  *
+ *   const tex  = YAPF.decodeTexture(bytes);          // any v1 / v2 file
+ *   const view = YAPF.textureToRGBA(tex, surface);   // { width, height, rgba }
+ *
  * An image is { width, height, channels (1–4), pixels: Uint8Array,
  *               gpuFormat, flags, mipLevels, mips: [Uint8Array, …] }.
- * The specification is the comment at the top of yapf.h.
+ * Version 2 textures (GPU blocks, 16-bit / float, cubes, arrays, volumes,
+ * animation) are decoded by decodeTexture; encoding writes version 1.
+ * The specification: yapf.h (v1) and docs/FORMAT.md (v2).
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -42,7 +47,676 @@
   const filterValid = (f) => f <= F_UPAVG || (f >= F_UP && f < F_UP + 8);
   const upK = (f) => (f >= F_UP ? f - F_UP + 1 : 1);
 
-  function corrupt() { throw new Error('YAPF: corrupt or unsupported file'); }
+  function corrupt() { throw new YapfError('corrupt', 'corrupt file'); }
+
+  /* ── Version 2: textures (decoding) ───────────────────────────────── */
+
+  const ENTROPY = 0x20, NOXFORM = 0x40, BLOCK_TILE = 16;
+  const HUFF_BITS = 11, HUFF_SIZE = 1 << HUFF_BITS, SLOTS = 48, CTXS = 7;
+  const NEED = { WIDE: 1, BLOCKS: 2, ENTROPY: 4, LAYOUT: 8, FRAMES: 16, ALL: 31 };
+  const r16 = (b, p) => b[p] | (b[p + 1] << 8);
+  const r64 = (b, p) => r32(b, p) + r32(b, p + 4) * 4294967296;
+
+  class YapfError extends Error {
+    constructor(code, msg) { super('YAPF: ' + msg); this.code = code; }
+  }
+  const fail = (code, msg) => { throw new YapfError(code, msg); };
+  const bad = () => fail('corrupt', 'corrupt file');
+
+  /* yapf-sum: 64-bit lanes kept as [hi, lo] uint32 pairs. */
+  const KH = 0x9E3779B9, KL = 0x7F4A7C15;
+  function mul64(ah, al, bh, bl) {            /* (a · b) mod 2^64 */
+    const a0 = al & 0xFFFF, a1 = al >>> 16, b0 = bl & 0xFFFF, b1 = bl >>> 16;
+    const p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+    const mid = (p00 >>> 16) + (p01 & 0xFFFF) + (p10 & 0xFFFF);
+    const lo = ((mid & 0xFFFF) * 65536 + (p00 & 0xFFFF)) >>> 0;
+    const hi = (p11 + (p01 >>> 16) + (p10 >>> 16) + Math.floor(mid / 65536) +
+                Math.imul(ah, bl) + Math.imul(al, bh)) >>> 0;
+    return [hi, lo];
+  }
+  function checksum(b, p, n) {
+    const lanes = [];
+    for (let i = 0; i < 4; i++) {
+      const [h, l] = mul64(0, i + 1, KH, KL);
+      lanes.push([(h ^ Math.floor(n / 4294967296)) >>> 0, (l ^ (n >>> 0)) >>> 0]);
+    }
+    const words = Math.ceil(n / 8);
+    for (let j = 0; j < words; j++) {
+      const q = p + j * 8;
+      let wl, wh;
+      if (q + 8 <= p + n) { wl = r32(b, q); wh = r32(b, q + 4); }
+      else {
+        const t = new Uint8Array(8); t.set(b.subarray(q, p + n));
+        wl = r32(t, 0); wh = r32(t, 4);
+      }
+      const a = lanes[j & 3];
+      const [h, l] = mul64((a[0] ^ wh) >>> 0, (a[1] ^ wl) >>> 0, KH, KL);
+      a[0] = h; a[1] = (l ^ h) >>> 0;                    /* a ^= a >> 32 */
+    }
+    const rot = (x, r) => r === 32 ? [x[1], x[0]]
+      : [((x[0] << r) | (x[1] >>> (32 - r))) >>> 0, ((x[1] << r) | (x[0] >>> (32 - r))) >>> 0];
+    const r1 = rot(lanes[1], 16), r2 = rot(lanes[2], 32), r3 = rot(lanes[3], 48 - 32);
+    const r3b = [r3[1], r3[0]];                            /* rotl 48 = rotl 16 then swap */
+    let hh = (lanes[0][0] ^ r1[0] ^ r2[0] ^ r3b[0]) >>> 0, hl = (lanes[0][1] ^ r1[1] ^ r2[1] ^ r3b[1]) >>> 0;
+    [hh, hl] = mul64(hh, hl, KH, KL);
+    return (hl ^ hh) >>> 0;
+  }
+
+  /* Huffman code table → lut[off .. off + 2048) (length << 8 | symbol). */
+  function huffTable(b, p, end, lut, off) {
+    if (p >= end) bad();
+    const n = b[p++] + 1, nbytes = (n + 1) >> 1;
+    if (end - p < nbytes) bad();
+    const len = new Uint8Array(n), count = new Uint32Array(HUFF_BITS + 2);
+    let kraft = 0;
+    for (let i = 0; i < n; i++) {
+      const l = (b[p + (i >> 1)] >> ((i & 1) * 4)) & 15;
+      if (l > HUFF_BITS) bad();
+      len[i] = l; count[l]++;
+      if (l) kraft += HUFF_SIZE >> l;
+    }
+    if ((n & 1) && (b[p + (n >> 1)] >> 4)) bad();
+    if (kraft === 0 || kraft > HUFF_SIZE) bad();
+    p += nbytes;
+    const next = new Uint32Array(HUFF_BITS + 2);
+    let code = 0;
+    count[0] = 0;
+    for (let l = 1; l <= HUFF_BITS; l++) { code = (code + count[l - 1]) << 1; next[l] = code; }
+    for (let s = 0; s < n; s++) {
+      const l = len[s];
+      if (!l) continue;
+      let c = next[l]++, r = 0;
+      for (let i = 0; i < l; i++) { r = (r << 1) | (c & 1); c >>= 1; }
+      for (let k = r; k < HUFF_SIZE; k += 1 << l) lut[off + k] = (l << 8) | s;
+    }
+    return p;
+  }
+
+  /* Code book → per slot one Uint16Array of 7 × 2048 entries. */
+  function readBook(b, p, len) {
+    const end = p + len;
+    if (len < 2) bad();
+    const n = r16(b, p);
+    p += 2;
+    if (n === 0 || n > SLOTS * CTXS) bad();
+    const book = new Array(SLOTS).fill(null), seen = new Uint8Array(SLOTS * CTXS);
+    for (let i = 0; i < n; i++) {
+      if (end - p < 3) bad();
+      const slot = b[p], ctx = b[p + 1];
+      if (slot >= SLOTS || ctx >= CTXS || seen[slot * CTXS + ctx]) bad();
+      seen[slot * CTXS + ctx] = 1;
+      if (!book[slot]) book[slot] = new Uint16Array(CTXS * HUFF_SIZE);
+      p = huffTable(b, p + 2, end, book[slot], ctx * HUFF_SIZE);
+    }
+    if (p !== end) bad();
+    return book;
+  }
+
+  /* Context of a residual from the folded residuals left + above. */
+  const ctxOf = (s) => (s > 0) + (s > 2) + (s > 6) + (s > 14) + (s > 30) + (s > 62);
+
+  /* Entropy plane payload: filters, u16 length, context-coded residuals. */
+  function huffPlane(b, p, end, z, tw, th, book, slot) {
+    const nb = (th + BAND - 1) >> 3;
+    if (!book || !book[slot] || end - p < nb + 2) bad();
+    const filt = b.subarray(p, p + nb);
+    for (let i = 0; i < nb; i++) if (!filterValid(filt[i])) bad();
+    p += nb;
+    const L = r16(b, p);
+    p += 2;
+    if (end - p < L) bad();
+    const lut = book[slot], se = p + L;
+    let buf = 0, bits = 0, pos = p, used = 0, i = 0;
+    for (let y = 0; y < th; y++)
+      for (let x = 0; x < tw; x++, i++) {
+        while (bits <= 24) { buf |= (pos < se ? b[pos] : 0) << bits; pos++; bits += 8; }
+        const s = (x ? z[i - 1] : 0) + (y ? z[i - tw] : 0);
+        const e = lut[(ctxOf(s) << HUFF_BITS) | (buf & (HUFF_SIZE - 1))];
+        if (!e) bad();
+        const n = e >> 8;
+        buf >>>= n; bits -= n; used += n;
+        z[i] = e & 255;
+      }
+    if (Math.ceil(used / 8) !== L) bad();
+    z.fill(0, tw * th, tw * th + GROUP);
+    return { p: se, filt };
+  }
+
+  /* Wide samples: byte planes, transforms at the sample width. */
+  function decodeTileWide(b, p, end, out, imgW, tx, ty, tw, th, ch, sample, book) {
+    const sb = sample === 3 ? 4 : 2, bits = 8 * sb, isf = sample >= 2, np = ch * sb;
+    const half = bits === 32 ? 0x80000000 : 0x8000;
+    const mod = bits === 32 ? (x) => x >>> 0 : (x) => x & 0xFFFF;
+    const sar1 = (v) => mod((v >>> 1) | (v & half));
+    if (end <= p) bad();
+    const hdr = b[p++];
+    if (hdr === STORED) {
+      if (end - p !== tw * th * ch * sb) bad();
+      for (let y = 0; y < th; y++) {
+        const d = ((ty + y) * imgW + tx) * ch;
+        for (let i = 0; i < tw * ch; i++, p += sb)
+          out[d + i] = sb === 2 ? r16(b, p) : r32(b, p);
+      }
+      return;
+    }
+    if (hdr & 0x8F) bad();
+    if ((hdr & NOXFORM) && (hdr & SUBGREEN)) bad();
+    if (ch < 3 && (hdr & (NOXFORM | SUBGREEN))) bad();
+    const xf = ch < 3 ? 2 : (hdr & NOXFORM) ? 2 : (hdr & SUBGREEN) ? 1 : 0;
+    const tsel = ch < 3 ? 0 : xf;
+    if (end - p < 2) bad();
+    const cmask = r16(b, p);
+    p += 2;
+    if (cmask >> np) bad();
+    let emask = 0;
+    if (hdr & ENTROPY) {
+      if (end - p < 2 || !book) bad();
+      emask = r16(b, p);
+      p += 2;
+      if ((emask >> np) || (emask & cmask)) bad();
+    }
+    const RL = TILE + 1, PL = TILE * RL;
+    const planes = new Uint8Array(np * PL), z = new Uint8Array(TILE_PX + GROUP);
+    for (let pl = 0; pl < np; pl++) {
+      if (!(cmask & (1 << pl))) continue;
+      if (p >= end) bad();
+      planes.fill(b[p++], pl * PL, (pl + 1) * PL);
+    }
+    for (let pl = 0; pl < np; pl++) {
+      if (cmask & (1 << pl)) continue;
+      z.fill(0);
+      const r = (emask & (1 << pl)) ? huffPlane(b, p, end, z, tw, th, book, tsel * 16 + pl)
+                                    : unpackPlane(b, p, end, z, tw, th);
+      p = r.p;
+      const base = pl * PL;
+      for (let y = 0; y < th; y++) {
+        const f = r.filt[y >> 3], k = upK(f);
+        unfilterRow(f, planes, base + y * RL,
+                    y ? planes : ZERO_ROW, y ? base + (y - 1) * RL : 0,
+                    y >= k ? planes : ZERO_ROW, y >= k ? base + (y - k) * RL : 0,
+                    z, y * tw, tw);
+      }
+    }
+    if (p !== end) bad();
+    const v = [0, 0, 0, 0];
+    for (let y = 0; y < th; y++) {
+      const d0 = ((ty + y) * imgW + tx) * ch, r0 = y * RL;
+      for (let x = 0; x < tw; x++) {
+        for (let c = 0; c < ch; c++) {
+          let a = 0;
+          for (let k = 0; k < sb; k++) a = a * 256 + planes[(c * sb + k) * PL + r0 + x];
+          v[c] = a;
+        }
+        if (xf === 0) {
+          const o = mod(v[1] - half), q = mod(v[2] - half), t = mod(v[0] - sar1(q));
+          const g = mod(q + t), bb = mod(t - sar1(o));
+          v[0] = mod(bb + o); v[1] = g; v[2] = bb;
+        } else if (xf === 1) {
+          const g = v[0];
+          v[0] = mod(v[1] + g - half); v[2] = mod(v[2] + g - half); v[1] = g;
+        }
+        for (let c = 0; c < ch; c++) {
+          let s = v[c];
+          if (isf) s = (s & half) ? mod(s ^ half) : mod(~s);
+          out[d0 + x * ch + c] = s;
+        }
+      }
+    }
+  }
+
+  /* GPU block tile: raw, or packed lane by lane with the book. */
+  function decodeBlockTile(b, p, end, packed, out, o0, rowb, tbw, tbh, S, book) {
+    const n = tbw * tbh;
+    if (!packed) {
+      if (end - p !== n * S) bad();
+      for (let r = 0; r < tbh; r++) out.set(b.subarray(p + r * tbw * S, p + (r + 1) * tbw * S), o0 + r * rowb);
+      return;
+    }
+    if (!book) bad();
+    let buf = 0, bits = 0, pos = p, used = 0;
+    for (let k = 0; k < S; k++) {
+      const lut = book[k];
+      if (!lut) bad();
+      for (let i = 0; i < n; i++) {
+        while (bits <= 24) { buf |= (pos < end ? b[pos] : 0) << bits; pos++; bits += 8; }
+        const e = lut[buf & (HUFF_SIZE - 1)];
+        if (!e) bad();
+        const l = e >> 8;
+        buf >>>= l; bits -= l; used += l;
+        out[o0 + Math.floor(i / tbw) * rowb + (i % tbw) * S + k] = e & 255;
+      }
+    }
+    if (Math.ceil(used / 8) !== end - p) bad();
+  }
+
+  const BLOCK_FORMATS = {
+    0x40: [4, 4, 8], 0x41: [4, 4, 16], 0x42: [4, 4, 16], 0x43: [4, 4, 8], 0x44: [4, 4, 8],
+    0x45: [4, 4, 16], 0x46: [4, 4, 16], 0x47: [4, 4, 16], 0x48: [4, 4, 16], 0x49: [4, 4, 16],
+    0x50: [4, 4, 8], 0x51: [4, 4, 8], 0x52: [4, 4, 16], 0x53: [4, 4, 8], 0x54: [4, 4, 8],
+    0x55: [4, 4, 16], 0x56: [4, 4, 16]
+  };
+  [[4, 4], [5, 4], [5, 5], [6, 5], [6, 6], [8, 5], [8, 6], [8, 8], [10, 5], [10, 6], [10, 8],
+   [10, 10], [12, 10], [12, 12]].forEach(([w, h], i) => { BLOCK_FORMATS[0x60 + i] = [w, h, 16]; });
+
+  function mipSize(t, m) {
+    return [Math.max(1, t.width >>> m), Math.max(1, t.height >>> m),
+            t.shape === 2 ? Math.max(1, t.depth >>> m) : 1];
+  }
+
+  function surfaceBytes(t, m) {
+    const [w, h, d] = mipSize(t, m);
+    if (t.payload === 1) {
+      const [bw, bh, S] = BLOCK_FORMATS[t.format];
+      return Math.ceil(w / bw) * Math.ceil(h / bh) * d * S;
+    }
+    return w * h * d * t.channels * (t.sample === 0 ? 1 : t.sample === 3 ? 4 : 2);
+  }
+
+  /* Decodes one surface (v2) into a typed array. */
+  function decodeSurface(b, t, s, verify) {
+    const m = s % t.mipLevels, [w, h, d] = mipSize(t, m);
+    const off = t._off[s], size = t._size[s], blocks = t.payload === 1;
+    let tcx, tcy, nbx = 0, nby = 0, S = 0;
+    if (blocks) {
+      const f = BLOCK_FORMATS[t.format];
+      nbx = Math.ceil(w / f[0]); nby = Math.ceil(h / f[1]); S = f[2];
+      tcx = Math.ceil(nbx / BLOCK_TILE); tcy = Math.ceil(nby / BLOCK_TILE);
+    } else {
+      tcx = Math.ceil(w / TILE); tcy = Math.ceil(h / TILE);
+    }
+    const tiles = tcx * tcy * d;
+    if (size < 4) bad();
+    const bl = r32(b, off);
+    if (bl > size - 4 || Math.floor((size - 4 - bl) / 8) < tiles) bad();
+    const pre = 4 + bl;
+    if (verify && checksum(b, off, pre + tiles * 8) !== t._tcheck[s]) fail('checksum', 'damaged file: a checksum does not match');
+    let book = null;
+    if (bl) {
+      if (!(t.needs & NEED.ENTROPY)) bad();
+      book = readBook(b, off + 4, bl);
+    }
+    const table = off + pre, end = off + size;
+    let pos = table + tiles * 8;
+    const sizes = new Array(tiles), packed = new Array(tiles), starts = new Array(tiles);
+    for (let i = 0; i < tiles; i++) {
+      let sz = r32(b, table + i * 8);
+      packed[i] = sz >>> 31;
+      sz &= 0x7FFFFFFF;
+      if (packed[i] && (!blocks || !book)) bad();
+      if (sz > end - pos) bad();
+      starts[i] = pos; sizes[i] = sz; pos += sz;
+    }
+    if (pos !== end) bad();
+
+    const bytes = surfaceBytes(t, m);
+    let out, store;
+    if (blocks || t.sample === 0) out = store = new Uint8Array(bytes);
+    else if (t.sample === 3) { store = new Uint32Array(bytes / 4); out = new Float32Array(store.buffer); }
+    else out = store = new Uint16Array(bytes / 2);
+    for (let i = 0; i < tiles; i++) {
+      const p = starts[i], e = p + sizes[i];
+      if (verify && checksum(b, p, sizes[i]) !== r32(b, table + i * 8 + 4))
+        fail('checksum', 'damaged file: a checksum does not match');
+      const row = Math.floor(i / tcx), z = Math.floor(row / tcy), ty = row % tcy, tx = i % tcx;
+      if (blocks) {
+        const bx0 = tx * BLOCK_TILE, by0 = ty * BLOCK_TILE, rowb = nbx * S;
+        decodeBlockTile(b, p, e, packed[i], store, z * nby * rowb + by0 * rowb + bx0 * S, rowb,
+                        Math.min(BLOCK_TILE, nbx - bx0), Math.min(BLOCK_TILE, nby - by0), S, book);
+      } else {
+        const x0 = tx * TILE, y0 = ty * TILE, tw = Math.min(TILE, w - x0), th = Math.min(TILE, h - y0);
+        const slice = w * h * t.channels;
+        const view = store.subarray(z * slice, (z + 1) * slice);
+        if (t.sample === 0) decodeTile(b, p, e, view, w, x0, y0, tw, th, t.channels, true, book);
+        else decodeTileWide(b, p, e, view, w, x0, y0, tw, th, t.channels, t.sample, book);
+      }
+    }
+    return out;
+  }
+
+  /*
+   * decodeTexture(bytes, { verify = true }) — any YAPF file (v1 or v2).
+   * Returns { version, width, height, depth, layers, frames, faces, shape,
+   * mipLevels, payload, format, sample, channels, flags, channelMap,
+   * linearMask, normal, primaries, transfer, mipFilter, alphaRef,
+   * loopCount, frameUs, notes: [{ tag, data }], surfaces: [...] }, where
+   * surfaces[s] is a Uint8Array (8-bit pixels, GPU blocks), Uint16Array
+   * (16-bit, half bits) or Float32Array, numbered
+   * s = ((frame · layers + layer) · faces + face) · mipLevels + mip.
+   * Errors are YapfError with .code 'not-yapf', 'version', 'unsupported',
+   * 'corrupt', 'checksum' or 'truncated'.
+   */
+  function decodeTexture(input, opts) {
+    const b = input instanceof Uint8Array ? input : new Uint8Array(input);
+    const verify = !(opts && opts.verify === false);
+    if (b.length < 5 || b[0] !== 0x59 || b[1] !== 0x41 || b[2] !== 0x50 || b[3] !== 0x46)
+      fail('not-yapf', 'not a YAPF file');
+    if (b[4] === 1) {
+      const img = decodeV1(b);
+      return { version: 1, width: img.width, height: img.height, depth: 1, layers: 1, frames: 1,
+               faces: 1, shape: 0, mipLevels: img.mipLevels, payload: 0, format: img.gpuFormat,
+               sample: 0, channels: img.channels, flags: img.flags, channelMap: [0, 0, 0, 0],
+               linearMask: 0, normal: 0, primaries: 0, transfer: 0, mipFilter: 0, alphaRef: 0,
+               loopCount: 0, frameUs: [], notes: [], surfaces: img.mips };
+    }
+    if (b[4] !== 2) fail('version', 'format version ' + b[4] + ' is newer than this decoder');
+    if (b.length < 64) fail('truncated', 'the file is truncated');
+    if (verify && checksum(b, 0, 0x3C) !== r32(b, 0x3C)) fail('checksum', 'damaged file: a checksum does not match');
+    const t = {
+      version: 2, channels: b[5], format: b[6], mipLevels: b[7], flags: b[8], payload: b[9],
+      sample: b[10], shape: b[11], width: r32(b, 0x0C), height: r32(b, 0x10), depth: r32(b, 0x14),
+      layers: r16(b, 0x18), frames: r16(b, 0x1A), needs: r32(b, 0x1C),
+      channelMap: Array.from(b.subarray(0x20, 0x24)), linearMask: b[0x24], normal: b[0x25],
+      primaries: b[0x26], transfer: b[0x27], mipFilter: b[0x28], alphaRef: b[0x29],
+      loopCount: r16(b, 0x2A), frameUs: [], notes: []
+    };
+    const notesSize = r32(b, 0x2C), fileSize = r64(b, 0x30);
+    if (t.needs & ~NEED.ALL) fail('unsupported', 'the file needs a feature this decoder does not have');
+    t.faces = t.shape === 1 ? 6 : 1;
+    if (t.channels < 1 || t.channels > 4 || t.sample > 3 || t.payload > 1 || t.shape > 2 ||
+        t.width < 1 || t.width > MAX_DIM || t.height < 1 || t.height > MAX_DIM ||
+        !t.layers || !t.frames || t.mipLevels < 1 || t.mipLevels > MAX_MIPS) bad();
+    if (t.shape === 2 ? (t.depth < 1 || t.depth > MAX_DIM || t.layers !== 1) : t.depth > 1) bad();
+    if (t.shape !== 2) t.depth = 1;
+    if (t.shape === 1 && t.width !== t.height) bad();
+    if (t.payload === 1 && !BLOCK_FORMATS[t.format]) bad();
+    if ((t.payload === 0 && t.sample !== 0 && !(t.needs & NEED.WIDE)) ||
+        (t.payload === 1 && !(t.needs & NEED.BLOCKS)) ||
+        ((t.shape !== 0 || t.layers > 1) && !(t.needs & NEED.LAYOUT)) ||
+        (t.frames > 1 && !(t.needs & NEED.FRAMES))) bad();
+    const S = t.frames * t.layers * t.faces * t.mipLevels;
+    if (S > (1 << 24)) bad();
+    const front = 64 + 16 * S + (t.frames > 1 ? 4 * t.frames : 0) + notesSize;
+    if (front > fileSize) bad();
+    if (b.length < fileSize) fail('truncated', 'the file is truncated');
+    if (verify && checksum(b, 64, front - 64) !== r32(b, 0x38)) fail('checksum', 'damaged file: a checksum does not match');
+    let q = 64 + 16 * S;
+    for (let f = 0; t.frames > 1 && f < t.frames; f++, q += 4) t.frameUs.push(r32(b, q));
+    const qe = q + notesSize;
+    while (q < qe) {
+      if (qe - q < 8) bad();
+      const sz = r32(b, q + 4);
+      if (qe - q - 8 < sz) bad();
+      t.notes.push({ tag: String.fromCharCode(b[q], b[q + 1], b[q + 2], b[q + 3]), data: b.slice(q + 8, q + 8 + sz) });
+      q += 8 + sz;
+    }
+    t._off = []; t._size = []; t._tcheck = [];
+    for (let s = 0; s < S; s++) {
+      const e = 64 + 16 * s, off = r64(b, e), size = r32(b, e + 8);
+      if (off < front || off > fileSize || size > fileSize - off) bad();
+      t._off.push(off); t._size.push(size); t._tcheck.push(r32(b, e + 12));
+    }
+    t.surfaces = [];
+    for (let s = 0; s < S; s++) t.surfaces.push(decodeSurface(b, t, s, verify));
+    delete t._off; delete t._size; delete t._tcheck;
+    return t;
+  }
+
+  /* ── GPU block decoding (previews) ───────────────────────────────── */
+
+  const PART2 = [0xCCCC, 0x8888, 0xEEEE, 0xECC8, 0xC880, 0xFEEC, 0xFEC8, 0xEC80, 0xC800, 0xFFEC, 0xFE80, 0xE800,
+    0xFFE8, 0xFF00, 0xFFF0, 0xF000, 0xF710, 0x008E, 0x7100, 0x08CE, 0x008C, 0x7310, 0x3100, 0x8CCE, 0x088C, 0x3110,
+    0x6666, 0x366C, 0x17E8, 0x0FF0, 0x718E, 0x399C, 0xAAAA, 0xF0F0, 0x5A5A, 0x33CC, 0x3C3C, 0x55AA, 0x9696, 0xA55A,
+    0x73CE, 0x13C8, 0x324C, 0x3BDC, 0x6996, 0xC33C, 0x9966, 0x0660, 0x0272, 0x04E4, 0x4E40, 0x2720, 0xC936, 0x936C,
+    0x39C6, 0x639C, 0x9336, 0x9CC6, 0x817E, 0xE718, 0xCCF0, 0x0FCC, 0x7744, 0xEE22];
+  const PART3 = [0xAA685050, 0x6A5A5040, 0x5A5A4200, 0x5450A0A8, 0xA5A50000, 0xA0A05050, 0x5555A0A0, 0x5A5A5050,
+    0xAA550000, 0xAA555500, 0xAAAA5500, 0x90909090, 0x94949494, 0xA4A4A4A4, 0xA9A59450, 0x2A0A4250, 0xA5945040,
+    0x0A425054, 0xA5A5A500, 0x55A0A0A0, 0xA8A85454, 0x6A6A4040, 0xA4A45000, 0x1A1A0500, 0x0050A4A4, 0xAAA59090,
+    0x14696914, 0x69691400, 0xA08585A0, 0xAA821414, 0x50A4A450, 0x6A5A0200, 0xA9A58000, 0x5090A0A8, 0xA8A09050,
+    0x24242424, 0x00AA5500, 0x24924924, 0x24499224, 0x50A50A50, 0x500AA550, 0xAAAA4444, 0x66660000, 0xA5A0A5A0,
+    0x50A050A0, 0x69286928, 0x44AAAA44, 0x66666600, 0xAA444444, 0x54A854A8, 0x95809580, 0x96969600, 0xA85454A8,
+    0x80959580, 0xAA141414, 0x96960000, 0xAAAA1414, 0xA05050A0, 0xA0A5A5A0, 0x96000000, 0x40804080, 0xA9A8A9A8,
+    0xAAAAAA44, 0x2A4A5254];
+  const ANCHOR2 = [15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 2, 8, 2, 2, 8, 8, 15, 2, 8, 2, 2,
+    8, 8, 2, 2, 15, 15, 6, 8, 2, 8, 15, 15, 2, 8, 2, 2, 2, 15, 15, 6, 6, 2, 6, 8, 15, 15, 2, 2, 15, 15, 15, 15, 15, 2, 2, 15];
+  const ANCHOR3A = [3, 3, 15, 15, 8, 3, 15, 15, 8, 8, 6, 6, 6, 5, 3, 3, 3, 3, 8, 15, 3, 3, 6, 10, 5, 8, 8, 6, 8, 5, 15,
+    15, 8, 15, 3, 5, 6, 10, 8, 15, 15, 3, 15, 5, 15, 15, 15, 15, 3, 15, 5, 5, 5, 8, 5, 10, 5, 10, 8, 13, 15, 12, 3, 3];
+  const ANCHOR3B = [15, 8, 8, 3, 15, 15, 3, 8, 15, 15, 15, 15, 15, 15, 15, 8, 15, 8, 15, 3, 15, 8, 15, 8, 3, 15, 6, 10,
+    15, 15, 10, 8, 15, 3, 15, 10, 10, 8, 9, 10, 6, 15, 8, 15, 3, 6, 6, 8, 15, 3, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15, 3, 15, 15, 8];
+  const WEIGHTS = { 2: [0, 21, 43, 64], 3: [0, 9, 18, 27, 37, 46, 55, 64],
+                    4: [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64] };
+  const interp = (a, b, w) => (a * (64 - w) + b * w + 32) >> 6;
+
+  function bits128(b, o) {
+    let pos = 0;
+    return (n) => {
+      let v = 0;
+      for (let i = 0; i < n; i++, pos++) v |= ((b[o + (pos >> 3)] >> (pos & 7)) & 1) << i;
+      return v >>> 0;
+    };
+  }
+
+  function rgb565(c) {
+    const r = (c >> 11) & 31, g = (c >> 5) & 63, bl = c & 31;
+    return [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (bl << 3) | (bl >> 2)];
+  }
+
+  function bc1Block(b, o, out, fourOnly) {
+    const c0 = r16(b, o), c1 = r16(b, o + 2), idx = r32(b, o + 4), four = c0 > c1 || fourOnly;
+    const p0 = rgb565(c0), p1 = rgb565(c1), pal = [p0.concat(255), p1.concat(255), [0, 0, 0, 255], [0, 0, 0, 255]];
+    for (let k = 0; k < 3; k++) {
+      if (four) { pal[2][k] = ((2 * p0[k] + p1[k] + 1) / 3) | 0; pal[3][k] = ((p0[k] + 2 * p1[k] + 1) / 3) | 0; }
+      else { pal[2][k] = (p0[k] + p1[k] + 1) >> 1; pal[3][k] = 0; }
+    }
+    if (!four) pal[3][3] = 0;
+    for (let i = 0; i < 16; i++) { const c = pal[(idx >>> (2 * i)) & 3]; for (let k = 0; k < 4; k++) out[i * 4 + k] = c[k]; }
+  }
+
+  function bc4Block(b, o, out, ch, snorm) {
+    const pal = new Array(8);
+    let r0 = b[o], r1 = b[o + 1];
+    if (snorm) { r0 = Math.max(-127, (r0 << 24) >> 24); r1 = Math.max(-127, (r1 << 24) >> 24); }
+    pal[0] = r0; pal[1] = r1;
+    const div = (v, d) => (v >= 0 ? Math.floor((v + (d >> 1)) / d) : -Math.floor((-v + (d >> 1)) / d));
+    if (r0 > r1) for (let i = 2; i < 8; i++) pal[i] = div((8 - i) * r0 + (i - 1) * r1, 7);
+    else { for (let i = 2; i < 6; i++) pal[i] = div((6 - i) * r0 + (i - 1) * r1, 5); pal[6] = snorm ? -127 : 0; pal[7] = snorm ? 127 : 255; }
+    let lo = r32(b, o + 2), hi = r16(b, o + 6);
+    for (let i = 0; i < 16; i++) {
+      const bit = 3 * i, v = bit < 30 ? (lo >>> bit) & 7 : bit === 30 ? ((lo >>> 30) | ((hi & 1) << 2)) : (hi >> (bit - 32)) & 7;
+      out[i * 4 + ch] = pal[v] + (snorm ? 128 : 0);
+    }
+  }
+
+  const BC7 = [[3, 4, 0, 0, 4, 0, 1, 0, 3, 0], [2, 6, 0, 0, 6, 0, 0, 1, 3, 0], [3, 6, 0, 0, 5, 0, 0, 0, 2, 0],
+    [2, 6, 0, 0, 7, 0, 1, 0, 2, 0], [1, 0, 2, 1, 5, 6, 0, 0, 2, 3], [1, 0, 2, 0, 7, 8, 0, 0, 2, 2],
+    [1, 0, 0, 0, 7, 7, 1, 0, 4, 0], [2, 6, 0, 0, 5, 5, 1, 0, 2, 0]];
+  const subsetOf = (ns, part, i) => ns === 2 ? (PART2[part] >> i) & 1 : ns === 3 ? (PART3[part] >>> (2 * i)) & 3 : 0;
+  const isAnchor = (ns, part, i) => i === 0 || (ns === 2 && i === ANCHOR2[part]) ||
+    (ns === 3 && (i === ANCHOR3A[part] || i === ANCHOR3B[part]));
+
+  function bc7Block(b, o, out) {
+    const get = bits128(b, o);
+    let mode = 0;
+    while (mode < 8 && !get(1)) mode++;
+    if (mode === 8) { out.fill(0, 0, 64); return; }
+    const [ns, pb, rb, isbB, cb, ab, epb, spb, ib, ib2] = BC7[mode];
+    const part = get(pb), rot = get(rb), isb = get(isbB), ne = ns * 2;
+    const ep = []; for (let e = 0; e < ne; e++) ep.push([0, 0, 0, 255]);
+    for (let c = 0; c < 3; c++) for (let e = 0; e < ne; e++) ep[e][c] = get(cb);
+    for (let e = 0; e < ne; e++) ep[e][3] = ab ? get(ab) : 255;
+    const pbit = epb | spb;
+    if (epb) for (let e = 0; e < ne; e++) { const p = get(1); for (let c = 0; c < 4; c++) if (c < 3 || ab) ep[e][c] = (ep[e][c] << 1) | p; }
+    else if (spb) for (let k = 0; k < ns; k++) { const p = get(1); for (let c = 0; c < 3; c++) { ep[2 * k][c] = (ep[2 * k][c] << 1) | p; ep[2 * k + 1][c] = (ep[2 * k + 1][c] << 1) | p; } }
+    for (let e = 0; e < ne; e++) for (let c = 0; c < 4; c++) {
+      if (c === 3 && !ab) continue;
+      const nb = (c < 3 ? cb : ab) + pbit, v = ep[e][c] << (8 - nb);
+      ep[e][c] = v | (v >> nb);
+    }
+    const idx = [], idx2 = [];
+    for (let i = 0; i < 16; i++) idx.push(get(ib - (isAnchor(ns, part, i) ? 1 : 0)));
+    for (let i = 0; i < 16; i++) idx2.push(ib2 ? get(ib2 - (i === 0 ? 1 : 0)) : 0);
+    const w1 = WEIGHTS[ib], w2 = WEIGHTS[ib2 || 2];
+    for (let i = 0; i < 16; i++) {
+      const k = subsetOf(ns, part, i), A = ep[2 * k], B = ep[2 * k + 1];
+      let cw, aw;
+      if (!ib2) cw = aw = w1[idx[i]];
+      else if (!isb) { cw = w1[idx[i]]; aw = w2[idx2[i]]; }
+      else { cw = w2[idx2[i]]; aw = w1[idx[i]]; }
+      const px = [interp(A[0], B[0], cw), interp(A[1], B[1], cw), interp(A[2], B[2], cw), interp(A[3], B[3], aw)];
+      if (rot) { const t = px[3]; px[3] = px[rot - 1]; px[rot - 1] = t; }
+      for (let c = 0; c < 4; c++) out[i * 4 + c] = px[c];
+    }
+  }
+
+  /* BC6H header layouts: [field, first bit, count]; fields 0–3 red w x y z,
+   * 4–7 green, 8–11 blue, 12 partition. */
+  const RW = 0, RX = 1, RY = 2, RZ = 3, GW = 4, GX = 5, GY = 6, GZ = 7, BW = 8, BX = 9, BY = 10, BZ = 11, PD = 12;
+  const BC6 = [
+    [0x00, 10, 5, 5, 5, [[GY,4,1],[BY,4,1],[BZ,4,1],[RW,0,10],[GW,0,10],[BW,0,10],[RX,0,5],[GZ,4,1],[GY,0,4],[GX,0,5],[BZ,0,1],[GZ,0,4],[BX,0,5],[BZ,1,1],[BY,0,4],[RY,0,5],[BZ,2,1],[RZ,0,5],[BZ,3,1],[PD,0,5]]],
+    [0x01, 7, 6, 6, 6, [[GY,5,1],[GZ,4,1],[GZ,5,1],[RW,0,7],[BZ,0,1],[BZ,1,1],[BY,4,1],[GW,0,7],[BY,5,1],[BZ,2,1],[GY,4,1],[BW,0,7],[BZ,3,1],[BZ,5,1],[BZ,4,1],[RX,0,6],[GY,0,4],[GX,0,6],[GZ,0,4],[BX,0,6],[BY,0,4],[RY,0,6],[RZ,0,6],[PD,0,5]]],
+    [0x02, 11, 5, 4, 4, [[RW,0,10],[GW,0,10],[BW,0,10],[RX,0,5],[RW,10,1],[GY,0,4],[GX,0,4],[GW,10,1],[BZ,0,1],[GZ,0,4],[BX,0,4],[BW,10,1],[BZ,1,1],[BY,0,4],[RY,0,5],[BZ,2,1],[RZ,0,5],[BZ,3,1],[PD,0,5]]],
+    [0x06, 11, 4, 5, 4, [[RW,0,10],[GW,0,10],[BW,0,10],[RX,0,4],[RW,10,1],[GZ,4,1],[GY,0,4],[GX,0,5],[GW,10,1],[GZ,0,4],[BX,0,4],[BW,10,1],[BZ,1,1],[BY,0,4],[RY,0,4],[BZ,0,1],[BZ,2,1],[RZ,0,4],[GY,4,1],[BZ,3,1],[PD,0,5]]],
+    [0x0A, 11, 4, 4, 5, [[RW,0,10],[GW,0,10],[BW,0,10],[RX,0,4],[RW,10,1],[BY,4,1],[GY,0,4],[GX,0,4],[GW,10,1],[BZ,0,1],[GZ,0,4],[BX,0,5],[BW,10,1],[BY,0,4],[RY,0,4],[BZ,1,1],[BZ,2,1],[RZ,0,4],[BZ,4,1],[BZ,3,1],[PD,0,5]]],
+    [0x0E, 9, 5, 5, 5, [[RW,0,9],[BY,4,1],[GW,0,9],[GY,4,1],[BW,0,9],[BZ,4,1],[RX,0,5],[GZ,4,1],[GY,0,4],[GX,0,5],[BZ,0,1],[GZ,0,4],[BX,0,5],[BZ,1,1],[BY,0,4],[RY,0,5],[BZ,2,1],[RZ,0,5],[BZ,3,1],[PD,0,5]]],
+    [0x12, 8, 6, 5, 5, [[RW,0,8],[GZ,4,1],[BY,4,1],[GW,0,8],[BZ,2,1],[GY,4,1],[BW,0,8],[BZ,3,1],[BZ,4,1],[RX,0,6],[GY,0,4],[GX,0,5],[BZ,0,1],[GZ,0,4],[BX,0,5],[BZ,1,1],[BY,0,4],[RY,0,6],[RZ,0,6],[PD,0,5]]],
+    [0x16, 8, 5, 6, 5, [[RW,0,8],[BZ,0,1],[BY,4,1],[GW,0,8],[GY,5,1],[GY,4,1],[BW,0,8],[GZ,5,1],[BZ,4,1],[RX,0,5],[GZ,4,1],[GY,0,4],[GX,0,6],[GZ,0,4],[BX,0,5],[BZ,1,1],[BY,0,4],[RY,0,5],[BZ,2,1],[RZ,0,5],[BZ,3,1],[PD,0,5]]],
+    [0x1A, 8, 5, 5, 6, [[RW,0,8],[BZ,1,1],[BY,4,1],[GW,0,8],[BY,5,1],[GY,4,1],[BW,0,8],[BZ,5,1],[BZ,4,1],[RX,0,5],[GZ,4,1],[GY,0,4],[GX,0,5],[BZ,0,1],[GZ,0,4],[BX,0,6],[BY,0,4],[RY,0,5],[BZ,2,1],[RZ,0,5],[BZ,3,1],[PD,0,5]]],
+    [0x1E, 6, 6, 6, 6, [[RW,0,6],[GZ,4,1],[BZ,0,1],[BZ,1,1],[BY,4,1],[GW,0,6],[GY,5,1],[BY,5,1],[BZ,2,1],[GY,4,1],[BW,0,6],[GZ,5,1],[BZ,3,1],[BZ,5,1],[BZ,4,1],[RX,0,6],[GY,0,4],[GX,0,6],[GZ,0,4],[BX,0,6],[BY,0,4],[RY,0,6],[RZ,0,6],[PD,0,5]]],
+    [0x03, 10, 10, 10, 10, [[RW,0,10],[GW,0,10],[BW,0,10],[RX,0,10],[GX,0,10],[BX,0,10]]],
+    [0x07, 11, 9, 9, 9, [[RW,0,10],[GW,0,10],[BW,0,10],[RX,0,9],[RW,10,1],[GX,0,9],[GW,10,1],[BX,0,9],[BW,10,1]]],
+    [0x0B, 12, 8, 8, 8, [[RW,0,10],[GW,0,10],[BW,0,10],[RX,0,8],[RW,11,1],[RW,10,1],[GX,0,8],[GW,11,1],[GW,10,1],[BX,0,8],[BW,11,1],[BW,10,1]]],
+    [0x0F, 16, 4, 4, 4, [[RW,0,10],[GW,0,10],[BW,0,10],[RX,0,4],[RW,15,1],[RW,14,1],[RW,13,1],[RW,12,1],[RW,11,1],[RW,10,1],[GX,0,4],[GW,15,1],[GW,14,1],[GW,13,1],[GW,12,1],[GW,11,1],[GW,10,1],[BX,0,4],[BW,15,1],[BW,14,1],[BW,13,1],[BW,12,1],[BW,11,1],[BW,10,1]]]
+  ];
+  const sext = (v, n) => { const m = 1 << (n - 1); v &= (1 << n) - 1; return (v ^ m) - m; };
+  function bc6Unq(v, n, sgn) {
+    if (!sgn) {
+      if (n >= 15) return v;
+      if (v === 0) return 0;
+      if (v === (1 << n) - 1) return 0xFFFF;
+      return ((v << 16) + 0x8000) >> n;
+    }
+    if (n >= 16) return v;
+    const s = v < 0; if (s) v = -v;
+    const u = v === 0 ? 0 : v >= (1 << (n - 1)) - 1 ? 0x7FFF : ((v << 15) + 0x4000) >> (n - 1);
+    return s ? -u : u;
+  }
+  function bc6Finish(v, sgn) {
+    if (!sgn) return (v * 31) >> 6;
+    v = v < 0 ? -(((-v) * 31) >> 5) : (v * 31) >> 5;
+    return v < 0 ? 0x8000 | -v : v;
+  }
+  function bc6Block(b, o, out, sgn) {
+    const get = bits128(b, o);
+    let code = get(2);
+    if (code > 1) code |= get(3) << 2;
+    const m = BC6.findIndex((x) => x[0] === code);
+    if (m < 0) { out.fill(0, 0, 48); return; }
+    const [, W, dr, dg, db, seg] = BC6[m], f = new Array(13).fill(0);
+    for (const [fi, lo, n] of seg) f[fi] |= get(n) << lo;
+    const regions = m < 10 ? 2 : 1, ne = regions * 2, dbits = [dr, dg, db], ep = [[], [], [], []];
+    for (let c = 0; c < 3; c++) {
+      for (let e = 0; e < ne; e++) ep[e][c] = f[c * 4 + e];
+      if (sgn) ep[0][c] = sext(ep[0][c], W);
+      const delta = m !== 9 && m !== 10;
+      for (let e = 1; e < ne; e++) {
+        if (delta || sgn) ep[e][c] = sext(ep[e][c], dbits[c]);
+        if (delta) { ep[e][c] = (ep[e][c] + ep[0][c]) & ((1 << W) - 1); if (sgn) ep[e][c] = sext(ep[e][c], W); }
+      }
+      for (let e = 0; e < ne; e++) ep[e][c] = bc6Unq(ep[e][c], W, sgn);
+    }
+    const part = f[PD], ib = regions === 2 ? 3 : 4, wt = WEIGHTS[ib];
+    for (let i = 0; i < 16; i++) {
+      const k = regions === 2 ? (PART2[part] >> i) & 1 : 0;
+      const anchor = i === 0 || (regions === 2 && i === ANCHOR2[part]);
+      const ix = get(ib - (anchor ? 1 : 0));
+      for (let c = 0; c < 3; c++) out[i * 3 + c] = bc6Finish(interp(ep[2 * k][c], ep[2 * k + 1][c], wt[ix]), sgn);
+    }
+  }
+
+  /* decodeBlocks(format, blocks, w, h) → RGBA Uint8Array (LDR) or RGB
+   * half-bits Uint16Array (BC6H); null for ETC2 / EAC / ASTC. */
+  function decodeBlocks(format, blocks, w, h) {
+    if (format >= 0x50 || !BLOCK_FORMATS[format]) return null;
+    const S = BLOCK_FORMATS[format][2], nbx = Math.ceil(w / 4), nby = Math.ceil(h / 4);
+    const hdr = format === 0x47 || format === 0x48;
+    const out = hdr ? new Uint16Array(w * h * 3) : new Uint8Array(w * h * 4);
+    const px = new Int32Array(64), hx = new Int32Array(48);
+    let o = 0;
+    for (let by = 0; by < nby; by++)
+      for (let bx = 0; bx < nbx; bx++, o += S) {
+        switch (format) {
+          case 0x40: bc1Block(blocks, o, px, false); break;
+          case 0x41:
+            bc1Block(blocks, o + 8, px, true);
+            for (let i = 0; i < 16; i++) px[i * 4 + 3] = ((blocks[o + (i >> 1)] >> (4 * (i & 1))) & 15) * 17;
+            break;
+          case 0x42: bc1Block(blocks, o + 8, px, true); bc4Block(blocks, o, px, 3, false); break;
+          case 0x43: case 0x44:
+            px.fill(0); bc4Block(blocks, o, px, 0, format === 0x44);
+            for (let i = 0; i < 16; i++) px[i * 4 + 3] = 255;
+            break;
+          case 0x45: case 0x46:
+            px.fill(0); bc4Block(blocks, o, px, 0, format === 0x46); bc4Block(blocks, o + 8, px, 1, format === 0x46);
+            for (let i = 0; i < 16; i++) px[i * 4 + 3] = 255;
+            break;
+          case 0x49: bc7Block(blocks, o, px); break;
+          default: bc6Block(blocks, o, hx, format === 0x48);
+        }
+        for (let y = 0; y < 4 && by * 4 + y < h; y++)
+          for (let x = 0; x < 4 && bx * 4 + x < w; x++) {
+            const d = (by * 4 + y) * w + bx * 4 + x, i = y * 4 + x;
+            if (hdr) for (let c = 0; c < 3; c++) out[d * 3 + c] = hx[i * 3 + c];
+            else for (let c = 0; c < 4; c++) out[d * 4 + c] = px[i * 4 + c];
+          }
+      }
+    return out;
+  }
+
+  function halfToFloat(h) {
+    const s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 31, m = h & 0x3FF;
+    if (e === 0) return s * m * Math.pow(2, -24);
+    if (e === 31) return m ? NaN : s * Infinity;
+    return s * (1 + m / 1024) * Math.pow(2, e - 15);
+  }
+
+  const linToSrgb = (v) => !(v > 0) ? 0 : v >= 1 ? 255
+    : Math.round(255 * (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055));
+
+  /*
+   * textureToRGBA(tex, surface = 0, slice = 0) → { width, height,
+   * rgba: Uint8ClampedArray } for display: gray expanded, 16-bit rounded,
+   * half / float clamped and sRGB encoded, GPU blocks decoded.  Throws for
+   * ETC2 / EAC / ASTC.
+   */
+  function textureToRGBA(tex, surface, slice) {
+    surface = surface || 0; slice = slice || 0;
+    const m = surface % tex.mipLevels, [w, h, d] = mipSize(tex, m), n = w * h;
+    const data = tex.surfaces[surface], rgba = new Uint8ClampedArray(n * 4);
+    let src, ch = tex.channels, kind = tex.payload === 1 ? 'u8' : ['u8', 'u16', 'f16', 'f32'][tex.sample];
+    if (tex.payload === 1) {
+      const per = data.length / d, blk = decodeBlocks(tex.format, data.subarray(per * slice, per * (slice + 1)), w, h);
+      if (!blk) fail('unsupported', 'ETC2 / EAC / ASTC blocks cannot be shown');
+      if (blk instanceof Uint16Array) { src = blk; ch = 3; kind = 'f16'; }
+      else {
+        rgba.set(blk);
+        if (tex.channels === 3) for (let i = 0; i < n; i++) rgba[i * 4 + 3] = 255;
+        return { width: w, height: h, rgba };
+      }
+    } else {
+      src = data.subarray(n * ch * slice, n * ch * (slice + 1));
+    }
+    for (let i = 0; i < n; i++) {
+      const v = [0, 0, 0, 255];
+      for (let c = 0; c < ch; c++) {
+        const x = src[i * ch + c], alpha = (ch === 2 && c === 1) || (ch === 4 && c === 3);
+        let q;
+        if (kind === 'u8') q = x;
+        else if (kind === 'u16') q = Math.round(x / 257);
+        else {
+          const f = kind === 'f16' ? halfToFloat(x) : x;
+          q = alpha ? Math.max(0, Math.min(255, Math.round(f * 255))) : linToSrgb(f);
+        }
+        v[ch <= 2 ? (c === 0 ? 0 : 3) : c] = q;
+      }
+      if (ch <= 2) v[1] = v[2] = v[0];
+      rgba.set(v, i * 4);
+    }
+    return { width: w, height: h, rgba };
+  }
+
+  function surfaceIndex(tex, frame, layer, face, mip) {
+    return (((frame || 0) * tex.layers + (layer || 0)) * tex.faces + (face || 0)) * tex.mipLevels + (mip || 0);
+  }
 
   /* ── Decoder ──────────────────────────────────────────────────────── */
 
@@ -102,7 +776,7 @@
     R[r0 + tw] = R[r0 + tw - 1];
   }
 
-  function decodeTile(b, p, end, out, imgW, tx, ty, tw, th, ch) {
+  function decodeTile(b, p, end, out, imgW, tx, ty, tw, th, ch, v2, book) {
     if (end <= p) corrupt();
     let hdr = b[p++];
     if (hdr === STORED) {
@@ -112,10 +786,18 @@
         out.set(b.subarray(p + rowb * y, p + rowb * (y + 1)), ((ty + y) * imgW + tx) * ch);
       return;
     }
-    if (hdr & 0xE0) corrupt();                         /* reserved bits set */
-    const xf = hdr & SUBGREEN;
+    if (hdr & (v2 ? 0x80 : 0xE0)) corrupt();           /* reserved bits set */
+    if ((hdr & 0x40) && (hdr & SUBGREEN)) corrupt();
+    /* xf: 0 YCoCg-R, 1 subtract-green, 2 none (v2) */
+    const xf = (hdr & 0x40) ? 2 : (hdr & SUBGREEN) ? 1 : 0, ent = hdr & 0x20;
     hdr &= 0x0F;
     if ((hdr >> ch) || (xf && ch < 3)) corrupt();
+    let emask = 0;
+    if (ent) {                                         /* v2: entropy planes */
+      if (p >= end || !book) corrupt();
+      emask = b[p++];
+      if ((emask >> ch) || (emask & hdr)) corrupt();
+    }
 
     const rowLen = TILE + 1, planeLen = RING * rowLen;
     const rows = new Uint8Array(4 * planeLen);
@@ -128,7 +810,8 @@
     for (let c = 0; c < ch; c++) {
       if (hdr & (1 << c)) continue;
       z[c] = new Uint8Array(TILE_PX + GROUP);
-      const r = unpackPlane(b, p, end, z[c], tw, th);
+      const r = (emask & (1 << c)) ? huffPlane(b, p, end, z[c], tw, th, book, xf * 16 + c)
+                                   : unpackPlane(b, p, end, z[c], tw, th);
       p = r.p; filt[c] = r.filt;
     }
     if (p !== end) corrupt();
@@ -147,7 +830,11 @@
       const P0 = ri, P1 = planeLen + ri, P2 = 2 * planeLen + ri, P3 = 3 * planeLen + ri;
       for (let x = 0; x < tw; x++, d += ch) {
         if (ch >= 3) {
-          if (xf) {
+          if (xf === 2) {
+            out[d] = rows[P0 + x];
+            out[d + 1] = rows[P1 + x];
+            out[d + 2] = rows[P2 + x];
+          } else if (xf) {
             const g = rows[P0 + x];
             out[d] = rows[P1 + x] + g - 128;
             out[d + 1] = g;
@@ -171,11 +858,27 @@
 
   const r32 = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
 
+  /* decode(bytes) → 8-bit image.  Reads version 1, and version 2 files
+   * that hold 8-bit pixels (2D; cube face 0 / layer 0 / frame 0).  Other
+   * textures: see decodeTexture. */
   function decode(input) {
     const b = input instanceof Uint8Array ? input : new Uint8Array(input);
+    if (b.length >= 5 && b[0] === 0x59 && b[1] === 0x41 && b[2] === 0x50 && b[3] === 0x46 && b[4] === 2) {
+      const t = decodeTexture(b);
+      if (t.payload !== 0 || t.sample !== 0 || t.shape === 2)
+        throw new YapfError('unsupported', 'this is a YAPF 2 texture (GPU blocks, 16-bit / float or a ' +
+                            'volume); use YAPF.decodeTexture and YAPF.textureToRGBA');
+      const mips = t.surfaces.slice(0, t.mipLevels);
+      return { width: t.width, height: t.height, channels: t.channels, gpuFormat: t.format,
+               flags: t.flags, mipLevels: t.mipLevels, pixels: mips[0], mips };
+    }
+    return decodeV1(b);
+  }
+
+  function decodeV1(b) {
     if (b.length < 20 || b[0] !== 0x59 || b[1] !== 0x41 || b[2] !== 0x50 || b[3] !== 0x46)
-      throw new Error('YAPF: not a YAPF file');
-    if (b[4] !== 1) throw new Error('YAPF: unsupported format version ' + b[4]);
+      throw new YapfError('not-yapf', 'not a YAPF file');
+    if (b[4] !== 1) throw new YapfError('version', 'unsupported format version ' + b[4]);
     const ch = b[5], mipLevels = b[7], W = r32(b, 12), H = r32(b, 16);
     if (ch < 1 || ch > 4 || mipLevels < 1 || mipLevels > MAX_MIPS ||
         W < 1 || W > MAX_DIM || H < 1 || H > MAX_DIM) corrupt();
@@ -459,5 +1162,7 @@
     return out;
   }
 
-  return { decode, encode, toRGBA, GPU, FLAG, VERSION: 1 };
+  return { decode, encode, toRGBA, decodeTexture, textureToRGBA, decodeBlocks, surfaceIndex,
+           checksum: (b) => checksum(b, 0, b.length), YapfError, GPU, FLAG, NEED,
+           VERSION: 1 /* written by encode */, READS: [1, 2] };
 }));

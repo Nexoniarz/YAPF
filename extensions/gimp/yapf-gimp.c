@@ -138,7 +138,43 @@ static GimpProcedure *yapf_plugin_create_procedure(GimpPlugIn  *plug_in,
     return procedure;
 }
 
+static GimpValueArray *yapf_error(GimpProcedure *procedure, const gchar *msg);
+
 /* ── Load handler ────────────────────────────────────────────────────── */
+
+/* Why a file could not be opened, in words. */
+static gchar *yapf_load_reason(const gchar *path, int err) {
+    FILE   *f = fopen(path, "rb");
+    uint8_t h[8] = {0};
+    size_t  n = f ? fread(h, 1, sizeof(h), f) : 0;
+    if (f) fclose(f);
+    if (!f || err == YAPF_ERR_IO)
+        return g_strdup("The file cannot be read.");
+    if (n < 5 || memcmp(h, "YAPF", 4) != 0)
+        return g_strdup("This is not a YAPF file (it does not start with \"YAPF\").");
+    if (h[4] != 1 && h[4] != 2)
+        return g_strdup_printf("This YAPF file is format version %u; this plug-in reads "
+                               "versions 1 and 2.  Update the plug-in.", h[4]);
+    switch (err) {
+    case YAPF_ERR_UNSUPPORTED:
+        return g_strdup("This YAPF file needs a feature this plug-in does not have yet. "
+                        "Update the plug-in.");
+    case YAPF_ERR_CHECKSUM:
+        return g_strdup("This YAPF file is damaged: a checksum does not match.");
+    case YAPF_ERR_TRUNCATED:
+        return g_strdup("This YAPF file is incomplete (truncated).");
+    case YAPF_ERR_OOM:
+        return g_strdup("Out of memory.");
+    default:
+        return g_strdup_printf("This YAPF file (version %u) is corrupt, or was written by a "
+                               "tool that does not follow the YAPF specification.", h[4]);
+    }
+}
+
+static const gchar *yapf_face_name(uint32_t f) {
+    static const gchar *n[6] = { "+X", "-X", "+Y", "-Y", "+Z", "-Z" };
+    return f < 6 ? n[f] : "?";
+}
 
 static GimpValueArray *yapf_load_run(
         GimpProcedure         *procedure,
@@ -151,60 +187,94 @@ static GimpValueArray *yapf_load_run(
 {
     (void)run_mode; (void)metadata; (void)flags; (void)config; (void)run_data;
 
-    gchar *path = g_file_get_path(file);
-    yapf_image_t *img = yapf_load_mt(path, 0);  /* all cores */
+    gchar          *path = g_file_get_path(file);
+    int             err  = 0;
+    yapf_texture_t *t    = yapf_tex_load(path, 0, 0, &err);   /* v1 and v2, all cores */
+    if (!t) {
+        gchar *why = yapf_load_reason(path, err);
+        g_free(path);
+        GError *e = g_error_new(GIMP_PLUG_IN_ERROR, 0, "Failed to load YAPF file: %s", why);
+        g_free(why);
+        return gimp_procedure_new_return_values(procedure, GIMP_PDB_EXECUTION_ERROR, e);
+    }
     g_free(path);
 
-    if (!img) {
-        GError *err = g_error_new(GIMP_PLUG_IN_ERROR, 0,
-                                  "Failed to load YAPF file.");
-        return gimp_procedure_new_return_values(procedure,
-                   GIMP_PDB_EXECUTION_ERROR, err);
+    /* What the pixels look like after decoding: GPU blocks decode to
+     * RGBA 8-bit, BC6H to RGB half float. */
+    gboolean blocks = t->payload == YAPF_PAYLOAD_BLOCKS;
+    gboolean bc6    = blocks && (t->format == YAPF_GPU_BC6H || t->format == YAPF_GPU_BC6H_SF);
+    if (blocks && t->format >= YAPF_GPU_ETC2_RGB8) {
+        yapf_tex_free(t);
+        return yapf_error(procedure, "Failed to load YAPF file: it holds ETC2 / EAC / ASTC "
+                                     "GPU blocks, which this plug-in cannot show yet.");
     }
+    int ch     = blocks ? (bc6 ? 3 : 4) : t->channels;
+    int sample = blocks ? (bc6 ? YAPF_SAMPLE_F16 : YAPF_SAMPLE_U8) : t->sample;
+    /* sRGB data is gamma encoded; floats are always linear */
+    gboolean gamma = (t->flags & YAPF_FLAG_SRGB) &&
+                     (sample == YAPF_SAMPLE_U8 || sample == YAPF_SAMPLE_U16);
 
-    /* Map YAPF channel count to GIMP image / layer types.
-     * Use gamma-corrected babl formats (R'G'B') when the file carries the
-     * sRGB flag; fall back to linear (RGB) otherwise. */
-    gboolean          is_srgb    = (img->flags & YAPF_FLAG_SRGB) != 0;
-    GimpImageBaseType base_type  = GIMP_RGB;
-    GimpImageType     layer_type = GIMP_RGBA_IMAGE;
-    const gchar      *babl_fmt   = is_srgb ? "R'G'B'A u8" : "RGBA u8";
+    static const gchar *chn[2][4] = { { "Y", "YA", "RGB", "RGBA" }, { "Y'", "Y'A", "R'G'B'", "R'G'B'A" } };
+    static const gchar *typ[4]    = { "u8", "u16", "half", "float" };
+    gchar *fmt_name = g_strdup_printf("%s %s", chn[gamma ? 1 : 0][ch - 1], typ[sample]);
+    const Babl *fmt = babl_format(fmt_name);
+    g_free(fmt_name);
 
-    switch (img->channels) {
-        case YAPF_CHANNELS_GRAY:
-            base_type  = GIMP_GRAY;
-            layer_type = GIMP_GRAY_IMAGE;
-            babl_fmt   = is_srgb ? "Y' u8" : "Y u8";
-            break;
-        case YAPF_CHANNELS_GRAY_ALPHA:
-            base_type  = GIMP_GRAY;
-            layer_type = GIMP_GRAYA_IMAGE;
-            babl_fmt   = is_srgb ? "Y'A u8" : "YA u8";
-            break;
-        case YAPF_CHANNELS_RGB:
-            base_type  = GIMP_RGB;
-            layer_type = GIMP_RGB_IMAGE;
-            babl_fmt   = is_srgb ? "R'G'B' u8" : "RGB u8";
-            break;
-        default: /* RGBA */
-            break;
+    GimpPrecision prec;
+    switch (sample) {
+    case YAPF_SAMPLE_U16: prec = gamma ? GIMP_PRECISION_U16_NON_LINEAR : GIMP_PRECISION_U16_LINEAR; break;
+    case YAPF_SAMPLE_F16: prec = GIMP_PRECISION_HALF_LINEAR; break;
+    case YAPF_SAMPLE_F32: prec = GIMP_PRECISION_FLOAT_LINEAR; break;
+    default:              prec = gamma ? GIMP_PRECISION_U8_NON_LINEAR : GIMP_PRECISION_U8_LINEAR; break;
     }
+    GimpImageBaseType base  = ch <= 2 ? GIMP_GRAY : GIMP_RGB;
+    GimpImageType     ltype = ch == 1 ? GIMP_GRAY_IMAGE : ch == 2 ? GIMP_GRAYA_IMAGE
+                            : ch == 3 ? GIMP_RGB_IMAGE : GIMP_RGBA_IMAGE;
 
-    GimpImage *image = gimp_image_new(img->width, img->height, base_type);
-    GimpLayer *layer = gimp_layer_new(image, "Background",
-                           img->width, img->height, layer_type,
-                           100.0,
-                           gimp_image_get_default_new_layer_mode(image));
-    gimp_image_insert_layer(image, layer, NULL, 0);
+    /* Mip 0 of every frame, layer, face and slice becomes one GIMP layer
+     * (the first at the bottom, as GIMP animations expect). */
+    uint32_t   w, h, d, faces = yapf_tex_faces(t);
+    yapf_tex_mip_size(t, 0, &w, &h, &d);
+    GimpImage *image = gimp_image_new_with_precision(w, h, base, prec);
+    size_t     texel = (size_t)ch * yapf_sample_bytes((uint8_t)sample);
+    void      *tmp   = blocks ? g_malloc((size_t)w * h * texel) : NULL;
+    gint       count = (gint)(t->frames * t->layers * faces * d);
 
-    GeglBuffer *buffer = gimp_drawable_get_buffer(GIMP_DRAWABLE(layer));
-    gegl_buffer_set(buffer,
-        GEGL_RECTANGLE(0, 0, (gint)img->width, (gint)img->height),
-        0, babl_format(babl_fmt),
-        img->pixels, GEGL_AUTO_ROWSTRIDE);
-    g_object_unref(buffer);
+    for (uint32_t fr = 0; fr < t->frames; fr++)
+        for (uint32_t ly = 0; ly < t->layers; ly++)
+            for (uint32_t fc = 0; fc < faces; fc++)
+                for (uint32_t z = 0; z < d; z++) {
+                    uint32_t s = yapf_tex_surface(t, fr, ly, fc, 0);
+                    size_t   slice = yapf_tex_surface_bytes(t, 0) / d;
+                    const uint8_t *src = (const uint8_t *)t->data[s] + slice * z;
+                    if (blocks) {
+                        yapf_blocks_decode(t->format, src, w, h, tmp);
+                        src = (const uint8_t *)tmp;
+                    }
+                    GString *name = g_string_new(NULL);
+                    if (t->frames > 1) {
+                        g_string_append_printf(name, "Frame %u", fr + 1);
+                        if (t->frame_us)
+                            g_string_append_printf(name, " (%ums)", (t->frame_us[fr] + 500) / 1000);
+                    }
+                    if (t->layers > 1) g_string_append_printf(name, "%sLayer %u", name->len ? ", " : "", ly);
+                    if (faces > 1)     g_string_append_printf(name, "%sFace %s", name->len ? ", " : "", yapf_face_name(fc));
+                    if (d > 1)         g_string_append_printf(name, "%sSlice %u", name->len ? ", " : "", z);
+                    if (!name->len)    g_string_append(name, "Background");
 
-    yapf_free(img);
+                    GimpLayer *layer = gimp_layer_new(image, name->str, (gint)w, (gint)h, ltype,
+                                                      100.0, gimp_image_get_default_new_layer_mode(image));
+                    g_string_free(name, TRUE);
+                    gimp_image_insert_layer(image, layer, NULL, 0);
+                    if (count > 1 && !(fr == 0 && ly == 0 && fc == 0 && z == 0))
+                        gimp_item_set_visible(GIMP_ITEM(layer), FALSE);
+                    GeglBuffer *buffer = gimp_drawable_get_buffer(GIMP_DRAWABLE(layer));
+                    gegl_buffer_set(buffer, GEGL_RECTANGLE(0, 0, (gint)w, (gint)h), 0, fmt,
+                                    src, GEGL_AUTO_ROWSTRIDE);
+                    g_object_unref(buffer);
+                }
+    g_free(tmp);
+    yapf_tex_free(t);
 
     GimpValueArray *ret = gimp_procedure_new_return_values(procedure,
                               GIMP_PDB_SUCCESS, NULL);

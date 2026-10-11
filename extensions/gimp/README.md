@@ -2,7 +2,11 @@
 
 Open and export `.yapf` images in **GIMP 3.0 or later**.
 
-- **File → Open** reads `.yapf` (Gray, Gray + Alpha, RGB, RGBA).
+- **File → Open** reads every `.yapf` file, version 1 and 2: Gray, Gray +
+  Alpha, RGB, RGBA in 8-bit, 16-bit, half and float precision; GPU blocks
+  (BC1–BC7, BC6H HDR) decoded for viewing; cube faces, array layers, volume
+  slices and animation frames as separate layers.  When a file cannot be
+  opened, the message says why (damaged, truncated, not YAPF, newer format).
 - **File → Export As… → `name.yapf`** writes the visible image (layers are
   flattened into a copy; your document is untouched), with an optional
   **Store mipmaps** checkbox for game engines.
@@ -50,5 +54,9 @@ GIMP config folder is `~/.config/GIMP/3.0` on Linux,
 - Pixels are saved with the sRGB flag, because GIMP's 8-bit buffers are
   gamma encoded.  Files marked linear load as linear.
 - When a file has mipmaps, GIMP opens the full-size image.
+- ETC2 / EAC / ASTC blocks cannot be shown yet.  Export writes 8-bit
+  version 1 files, as before.
 - Tested with GIMP 3.0.8 on Linux: opening matches the reference decoder
   pixel for pixel, and export equals GIMP's own flattened PNG of the image.
+  The version 2 loader was tested in GIMP 3.0.6 (nixpkgs 25.05, headless):
+  BC7, BC5, BC6H, half float, 16-bit, cube, animation and a damaged file.

@@ -22,13 +22,14 @@ the same native code, so they are all about equally fast; the JavaScript
 port needs no native library at all.  Every example also re-encodes the
 image and checks that the result is byte-identical to the original file.
 
-**YAPF 2 textures.**  The bindings wrap the version 1 API (`yapf_load`,
+**YAPF 2 textures.**  Most bindings wrap the version 1 API (`yapf_load`,
 `yapf_save`, …).  Through it they also read 8-bit version 2 files (2D, or
 face 0 / layer 0 of cubes and arrays).  GPU blocks, 16-bit / float pixels,
 volumes and the other version 2 features are available from C and C++
 through the `yapf_tex_*` functions in [`yapf.h`](../yapf.h) (see
 [FORMAT.md](FORMAT.md)); any language with a C FFI can call them the same
-way.  The JavaScript port reads and writes version 1 only.
+way.  Python (`yapf.load_texture`) and JavaScript (`YAPF.decodeTexture`)
+read every version 2 texture; the JavaScript port writes version 1.
 
 ## Getting the native library
 

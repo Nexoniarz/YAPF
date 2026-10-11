@@ -12,6 +12,14 @@ Blender 5.1).
 Blender cannot read `.yapf` on its own, so imported images are **packed into
 the .blend** and survive saving and reopening.
 
+Every YAPF file opens, version 1 and 2: 8-bit images; GPU blocks (BC1–BC7,
+BC6H) decoded; 16-bit, half and float textures as **float images** (HDR
+values above 1 are kept, packed as EXR); for cubes, arrays and animations
+the first image.  Normal maps follow Blender's OpenGL convention: DirectX
+normals get their green flipped, and X/Y-only normals (such as BC5) get Z
+rebuilt.  Version 2 files need the bundled native library; the pure-Python
+fallback reads version 1 only.  Tested in Blender 4.4.3 (nixpkgs).
+
 ## Install
 
 1. Get `yapf_image-blender.zip` from the

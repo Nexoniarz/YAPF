@@ -632,6 +632,35 @@ static void v2_mips(void) {
     yapf_tex_free(t);
 }
 
+static void v2_preview(void) {
+    uint8_t out[4 * 4 * 4];
+    /* gray + alpha u16 */
+    yapf_texture_t d = desc(4, 4, 2, YAPF_SAMPLE_U16);
+    yapf_texture_t *t = yapf_tex_create(&d);
+    uint16_t *p = (uint16_t *)t->data[0];
+    for (int i = 0; i < 16; i++) { p[2 * i] = 65535; p[2 * i + 1] = 32896; }
+    int ok = yapf_tex_to_rgba8(t, 0, 0, out) == YAPF_OK &&
+             out[0] == 255 && out[1] == 255 && out[2] == 255 && out[3] == 128;
+    yapf_tex_free(t);
+    /* linear half 0.2140 → sRGB 128, 2.0 clamps, alpha stays linear */
+    d = desc(4, 4, 4, YAPF_SAMPLE_F16);
+    t = yapf_tex_create(&d);
+    p = (uint16_t *)t->data[0];
+    for (int i = 0; i < 16; i++) {
+        p[4 * i] = yapf_float_to_half(0.2158605f); p[4 * i + 1] = yapf_float_to_half(2.0f);
+        p[4 * i + 2] = yapf_float_to_half(-1.0f);  p[4 * i + 3] = yapf_float_to_half(0.5f);
+    }
+    ok = ok && yapf_tex_to_rgba8(t, 0, 0, out) == YAPF_OK &&
+         out[0] == 128 && out[1] == 255 && out[2] == 0 && out[3] == 128;
+    /* BC7 and BC6H go through the block decoders */
+    yapf_texture_t *c = NULL;
+    ok = ok && yapf_tex_compress(t, YAPF_GPU_BC6H, &c) == YAPF_OK &&
+         yapf_tex_to_rgba8(c, 0, 0, out) == YAPF_OK && out[3] == 255 && out[1] == 255;
+    yapf_tex_free(c);
+    yapf_tex_free(t);
+    CHECK(ok, "yapf_tex_to_rgba8 converts every payload for display");
+}
+
 static void v2_misc(void) {
     int ok = 1;
     for (uint32_t h = 0; h < 0x10000 && ok; h++) {
@@ -697,6 +726,7 @@ int main(int argc, char **argv) {
     v2_gpu();
     v2_mips();
     v2_misc();
+    v2_preview();
 
     printf("%d tests, %d failures\n", tests, fails);
     return fails != 0;

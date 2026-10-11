@@ -4677,3 +4677,71 @@ int yapf_tex_build_mips(yapf_texture_t *tex, uint32_t levels, uint8_t alpha_ref)
     else tex->flags &= (uint8_t)~YAPF_FLAG_COVERAGE;
     return YAPF_OK;
 }
+
+/* ========================================================================
+ *  Previews
+ * ======================================================================== */
+
+/* Linear 0..1 → sRGB code, exact to the 8-bit rounding (thresholds). */
+static uint8_t yapf__lin_to_code(const yapf__srgb_tab *t, float v) {
+    if (!(v > 0.0f)) return 0;                  /* also NaN */
+    if (v >= 1.0f) return 255;
+    return (uint8_t)(yapf__lin_to_srgb(t, v) * 255.0f + 0.5f);
+}
+
+int yapf_tex_to_rgba8(const yapf_texture_t *tex, uint32_t surface, uint32_t slice, uint8_t *out) {
+    uint32_t S;
+    if (!out || yapf__tex_check(tex, &S) != 0 || surface >= S || !tex->data || !tex->data[surface])
+        return YAPF_ERR_INVALID;
+    uint32_t m = surface % tex->mip_levels, w, h, d;
+    yapf_tex_mip_size(tex, m, &w, &h, &d);
+    if (slice >= d) return YAPF_ERR_INVALID;
+    size_t         n = (size_t)w * h;
+    const uint8_t *src = (const uint8_t *)tex->data[surface] + yapf_tex_surface_bytes(tex, m) / d * slice;
+
+    int       ch = tex->channels, sample = tex->sample;
+    uint16_t *half = NULL;
+    if (tex->payload == YAPF_PAYLOAD_BLOCKS) {
+        if (tex->format != YAPF_GPU_BC6H && tex->format != YAPF_GPU_BC6H_SF) {
+            int rc = yapf_blocks_decode(tex->format, src, w, h, out);
+            if (rc == YAPF_OK && tex->channels == 3)    /* BC1 / BC7 without alpha */
+                for (size_t i = 0; i < n; i++) out[i * 4 + 3] = 255;
+            return rc;
+        }
+        half = (uint16_t *)malloc(n * 3 * sizeof(uint16_t));
+        if (!half) return YAPF_ERR_OOM;
+        yapf_blocks_decode(tex->format, src, w, h, half);
+        src = (const uint8_t *)half;
+        ch = 3;
+        sample = YAPF_SAMPLE_F16;
+    }
+    yapf__srgb_tab *st = NULL;
+    if (sample == YAPF_SAMPLE_F16 || sample == YAPF_SAMPLE_F32) {
+        st = (yapf__srgb_tab *)malloc(sizeof(yapf__srgb_tab));
+        if (!st) { free(half); return YAPF_ERR_OOM; }
+        yapf__srgb_init(st);
+    }
+    size_t sb = yapf__sbytes(sample);
+    for (size_t i = 0; i < n; i++) {
+        uint8_t v[4] = { 0, 0, 0, 255 };
+        for (int c = 0; c < ch; c++) {
+            uint32_t x = yapf__get_sample(src + (i * ch + c) * sb, sample);
+            int      alpha = (ch == 2 && c == 1) || (ch == 4 && c == 3);
+            uint8_t  b;
+            if (sample == YAPF_SAMPLE_U8) b = (uint8_t)x;
+            else if (sample == YAPF_SAMPLE_U16) b = (uint8_t)((x + 128) / 257);
+            else {
+                float f;
+                if (sample == YAPF_SAMPLE_F16) f = yapf_half_to_float((uint16_t)x);
+                else memcpy(&f, &x, 4);
+                b = alpha ? (uint8_t)yapf__clampi(f * 255.0f, 0, 255) : yapf__lin_to_code(st, f);
+            }
+            v[ch <= 2 ? (c == 0 ? 0 : 3) : c] = b;
+        }
+        if (ch <= 2) v[1] = v[2] = v[0];
+        memcpy(out + i * 4, v, 4);
+    }
+    free(st);
+    free(half);
+    return YAPF_OK;
+}
