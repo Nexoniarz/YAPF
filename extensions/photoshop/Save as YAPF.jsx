@@ -22,8 +22,10 @@
     try {
         if (copy.mode !== DocumentMode.RGB && copy.mode !== DocumentMode.GRAYSCALE)
             copy.changeMode(ChangeMode.RGB);
-        if (copy.bitsPerChannel !== BitsPerChannelType.EIGHT)
-            copy.bitsPerChannel = BitsPerChannelType.EIGHT;
+        // 8 and 16 bits per channel are kept (16-bit becomes a 16-bit
+        // YAPF texture); 32-bit documents are saved as 16-bit.
+        if (copy.bitsPerChannel === BitsPerChannelType.THIRTYTWO)
+            copy.bitsPerChannel = BitsPerChannelType.SIXTEEN;
         var opts = new PNGSaveOptions();
         opts.interlaced = false;
         copy.saveAs(tmp, opts, true, Extension.LOWERCASE);
@@ -35,6 +37,6 @@
     if (mips) args.push("--mips");
     var ok = yapfRun(args, out);
     tmp.remove();
-    if (!ok) { alert("Could not write " + out.name + ".\n\n" + YAPF_TOOL_HELP); return; }
+    if (!ok) { alert("Could not write " + out.name + ".\n\n" + yapfFailText()); return; }
     alert("Saved " + out.fsName + " (" + Math.round(out.length / 1024) + " KB)");
 })();

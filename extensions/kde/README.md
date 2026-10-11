@@ -48,3 +48,9 @@ Log out and back in, then enable **YAPF Images** in Dolphin's preview settings.
 Built against KF6 / Qt 6 and tested by loading the plugin through KDE's
 plugin factory and creating thumbnails (RGBA, RGB, mipmapped, wide images;
 corrupt files are rejected).  Not yet tried inside a running Dolphin.
+
+Reads YAPF version 1 and 2: GPU blocks (BC1–BC7, BC6H), 16-bit and float
+textures, cubes (face +X), arrays, volumes and animations (the first
+image).  Only the mip level the thumbnail needs is decoded.  Tested with
+KF6 from nixpkgs 25.05 on BC7, BC5, BC6H, half float, 16-bit, cube and
+animation files.  ETC2 / ASTC files get no thumbnail.

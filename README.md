@@ -332,6 +332,7 @@ YAPF_CHANNELS_RGBA        4
 | System | Command | Output |
 | :----- | :------ | :----- |
 | Linux, macOS, BSD | `make` · `make test` · `sudo make install` | `build/`: `libyapf.a`, `libyapf.so` / `.dylib`, `yapf` |
+| NixOS / Nix | `nix-build` (or `nix-env -if .`) — see [extensions/linux](extensions/linux#nixos) | `result/`: `bin/yapf`, `lib/`, `include/`, MIME type, thumbnailer |
 | Linux, macOS (LLVM) | `./build.sh` | `dist/<platform>/` incl. macOS universal binaries |
 | Windows (LLVM) | `build.bat` | `dist\windows-x64\`, `dist\windows-arm64\`: `yapf.dll`, `yapf.lib`, `libyapf.a`, `yapf.exe` |
 | Windows (Visual Studio) | `cl /O2 /c yapf.c` and add `yapf.obj` to your project | |

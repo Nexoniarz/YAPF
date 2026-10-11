@@ -14,9 +14,11 @@
     if (!(files instanceof Array)) files = [files];
 
     for (var i = 0; i < files.length; i++) {
-        var tmp = yapfTempFile(".png");
+        // 8 / 16-bit images come through PNG (16 bits are kept); half,
+        // float and BC6H HDR textures through Radiance .hdr (32-bit).
+        var tmp = yapfTempFile(yapfIsHdr(files[i]) ? ".hdr" : ".png");
         if (!yapfRun([files[i].fsName, tmp.fsName], tmp)) {
-            alert("Could not open " + files[i].name + ".\n\n" + YAPF_TOOL_HELP);
+            alert("Could not open " + files[i].name + ".\n\n" + yapfFailText());
             return;
         }
         var doc = app.open(tmp);

@@ -20,14 +20,50 @@ function yapfTool() {
     return names[0];                              // rely on the PATH
 }
 
-// Runs the tool; returns true when `expectOut` was produced.
-function yapfRun(args, expectOut) {
+// Runs the tool with its output (stdout) going to `stdoutFile` when given.
+// Returns the tool's error text ("" when it printed none).
+function yapfExec(args, stdoutFile) {
+    var errFile = yapfTempFile(".txt");
     var cmd = yapfQuote(yapfTool());
     for (var i = 0; i < args.length; i++) cmd += " " + (args[i].charAt(0) === "-" ? args[i] : yapfQuote(args[i]));
+    if (stdoutFile) cmd += " > " + yapfQuote(stdoutFile.fsName);
+    cmd += " 2> " + yapfQuote(errFile.fsName);
     if (YAPF_IS_WINDOWS) cmd = '"' + cmd + '"';    // cmd.exe strips one pair of quotes
-    if (expectOut.exists) expectOut.remove();
     app.system(cmd);
+    var text = yapfReadText(errFile);
+    errFile.remove();
+    return text;
+}
+
+function yapfReadText(f) {
+    if (!f.exists || !f.open("r")) return "";
+    var t = f.read();
+    f.close();
+    return t.replace(/\s+$/, "");
+}
+
+// Runs the tool; returns true when `expectOut` was produced.  The tool's
+// own message (why it failed) is left in yapfLastError.
+var yapfLastError = "";
+function yapfRun(args, expectOut) {
+    if (expectOut.exists) expectOut.remove();
+    yapfLastError = yapfExec(args, null);
     return expectOut.exists;
+}
+
+// The tool's message, or the help text when the tool could not be run.
+function yapfFailText() {
+    return /yapf: /.test(yapfLastError) ? yapfLastError : YAPF_TOOL_HELP;
+}
+
+// True when a .yapf file holds float / HDR data (half, float, BC6H), so it
+// should open as a 32-bit document instead of a clamped 8-bit one.
+function yapfIsHdr(file) {
+    var info = yapfTempFile(".txt");
+    yapfExec(["info", file.fsName], info);
+    var text = yapfReadText(info);
+    info.remove();
+    return /payload\s*:[^\n]*(half float|, float|BC6H)/.test(text);
 }
 
 function yapfTempFile(ext) {

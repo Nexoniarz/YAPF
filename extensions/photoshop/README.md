@@ -25,6 +25,16 @@ native plugin.
 
 Instead of copying `yapf` next to the scripts you can put it on your `PATH`.
 
+## What opens how
+
+Every YAPF file the `yapf` tool reads (version 1 and 2): 8-bit images open
+as 8-bit documents, 16-bit textures as 16-bit documents, half / float and
+BC6H HDR textures as 32-bit documents (through Radiance `.hdr`), other GPU
+blocks (BC1–BC7) decoded to 8-bit.  Cubes, arrays and animations open their
+first image.  When a file cannot be opened, the alert shows the tool's
+reason (for example a damaged file).  Saving keeps 8 or 16 bits per
+channel.
+
 ## Status
 
 The scripts are written for Photoshop CC's ExtendScript and are not yet

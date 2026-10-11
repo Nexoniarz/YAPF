@@ -167,6 +167,8 @@ static int parse_map(const char *s, uint8_t *map) {
     return 1;
 }
 
+static const char *err_name(int e);
+
 /* ── Reading any input into a texture ────────────────────────────────── */
 
 static yapf_texture_t *new_tex(uint32_t w, uint32_t h, int ch, int sample) {
@@ -182,7 +184,7 @@ static yapf_texture_t *read_input(const char *path, const opts_t *o, int *from_y
     if (is_yapf(path)) {
         int err = 0;
         yapf_texture_t *t = yapf_tex_load(path, 0, 0, &err);
-        if (!t) fprintf(stderr, "yapf: cannot read %s (error %d)\n", path, err);
+        if (!t) fprintf(stderr, "yapf: cannot read %s: %s\n", path, err_name(err));
         *from_yapf = 1;
         return t;
     }
@@ -399,6 +401,58 @@ static uint8_t *to8(const float *f, size_t n) {
     return o;
 }
 
+/* 16-bit PNG (stb_image_write only writes 8 bits): rows of big-endian
+ * samples, filter 0, compressed with stb's zlib. */
+static uint32_t png_crc(const uint8_t *p, size_t n, uint32_t c) {
+    c = ~c;
+    for (size_t i = 0; i < n; i++) {
+        c ^= p[i];
+        for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1)));
+    }
+    return ~c;
+}
+
+static void png_chunk(FILE *f, const char *type, const uint8_t *d, uint32_t n) {
+    uint8_t b[4] = { (uint8_t)(n >> 24), (uint8_t)(n >> 16), (uint8_t)(n >> 8), (uint8_t)n };
+    fwrite(b, 1, 4, f);
+    fwrite(type, 1, 4, f);
+    if (n) fwrite(d, 1, n, f);
+    uint32_t c = png_crc(d, n, png_crc((const uint8_t *)type, 4, 0));
+    uint8_t cb[4] = { (uint8_t)(c >> 24), (uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c };
+    fwrite(cb, 1, 4, f);
+}
+
+static int write_png16(const char *path, const uint16_t *px, int w, int h, int ch) {
+    size_t   row = (size_t)w * ch * 2 + 1;
+    uint8_t *raw = (uint8_t *)malloc(row * h);
+    if (!raw) return 0;
+    for (int y = 0; y < h; y++) {
+        uint8_t *r = raw + row * y;
+        r[0] = 0;
+        for (int i = 0; i < w * ch; i++) {
+            uint16_t v = px[(size_t)y * w * ch + i];
+            r[1 + 2 * i] = (uint8_t)(v >> 8);
+            r[2 + 2 * i] = (uint8_t)v;
+        }
+    }
+    int      zlen = 0;
+    uint8_t *z = stbi_zlib_compress(raw, (int)(row * h), &zlen, 8);
+    free(raw);
+    FILE *f = z ? fopen(path, "wb") : NULL;
+    if (!f) { STBIW_FREE(z); return 0; }
+    static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', 13, 10, 26, 10 };
+    static const uint8_t ctype[5] = { 0, 0, 4, 2, 6 };
+    uint8_t ihdr[13] = { (uint8_t)(w >> 24), (uint8_t)(w >> 16), (uint8_t)(w >> 8), (uint8_t)w,
+                         (uint8_t)(h >> 24), (uint8_t)(h >> 16), (uint8_t)(h >> 8), (uint8_t)h,
+                         16, ctype[ch], 0, 0, 0 };
+    fwrite(sig, 1, 8, f);
+    png_chunk(f, "IHDR", ihdr, 13);
+    png_chunk(f, "IDAT", z, (uint32_t)zlen);
+    png_chunk(f, "IEND", NULL, 0);
+    STBIW_FREE(z);
+    return fclose(f) == 0;
+}
+
 static int write_image(const char *path, const void *px, int w, int h, int ch, int hdr) {
     if (ends_with(path, ".hdr")) {
         if (!hdr) {
@@ -445,9 +499,19 @@ static int export_image(const yapf_texture_t *t, const char *in, const char *out
                                                   : "no such slice, or out of memory");
         return 1;
     }
-    if (t->sample == YAPF_SAMPLE_U16 && !ends_with(out, ".hdr"))
-        fprintf(stderr, "yapf: note: 16-bit samples written as 8-bit\n");
-    int ok = write_image(out, px, (int)w, (int)h, ch, hdr);
+    int ok;
+    if (t->payload == YAPF_PAYLOAD_PIXELS && t->sample == YAPF_SAMPLE_U16 && ends_with(out, ".png")) {
+        /* keep all 16 bits */
+        uint32_t m = s % t->mip_levels, d;
+        yapf_tex_mip_size(t, m, NULL, NULL, &d);
+        const uint16_t *src = (const uint16_t *)((const uint8_t *)t->data[s] +
+                              yapf_tex_surface_bytes(t, m) / d * (uint32_t)o->slice);
+        ok = write_png16(out, src, (int)w, (int)h, t->channels);
+    } else {
+        if (t->sample == YAPF_SAMPLE_U16 && !ends_with(out, ".hdr"))
+            fprintf(stderr, "yapf: note: 16-bit samples written as 8-bit (use .png to keep them)\n");
+        ok = write_image(out, px, (int)w, (int)h, ch, hdr);
+    }
     free(px);
     if (!ok) { fprintf(stderr, "yapf: cannot write %s\n", out); return 1; }
     return 0;
