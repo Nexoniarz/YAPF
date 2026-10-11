@@ -16,6 +16,7 @@ You need GIMP 3 with its development files (`gimptool`).
 | Arch / Manjaro  | `sudo pacman -S gimp` (includes them)               |
 | Debian / Ubuntu | `sudo apt install libgimp-3.0-dev` (GIMP 3 packages) |
 | Fedora          | `sudo dnf install gimp-devel`                       |
+| NixOS           | `nix-shell gimp-shell.nix` (in this folder), then build inside that shell |
 | Windows         | MSYS2: `pacman -S mingw-w64-ucrt-x86_64-gimp`        |
 | macOS           | build GIMP 3 from source or use MacPorts/Homebrew   |
 
@@ -27,6 +28,11 @@ gimptool --install yapf-gimp.c
 
 That compiles the plugin (it pulls in `../../yapf.c` itself) and installs it
 into your personal GIMP plug-ins folder.  Restart GIMP.
+
+On NixOS, build with the same nixpkgs channel your GIMP comes from (the
+plugin links against that GIMP's libraries), and build it again after a
+GIMP update.  Your GIMP must be GIMP 3: `environment.systemPackages = [
+pkgs.gimp3 ];`, or `nix-shell -p gimp3 --run gimp` to try it.
 
 ### Manual build
 
