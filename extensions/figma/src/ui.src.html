@@ -64,14 +64,26 @@ $('tab-import').onclick = () => tab('import');
 $('tab-export').onclick = () => tab('export');
 
 /* Import: .yapf → pixels → exact PNG → Figma image */
+/* Any YAPF file → 8-bit pixels.  8-bit images keep their exact pixels and
+ * channels; GPU blocks, 16-bit and float textures are converted for display
+ * (RGBA).  Cubes, arrays, volumes and animations give their first image. */
+function yapfToPixels(tex) {
+  const w = tex.width, h = tex.height;
+  if (tex.payload === 0 && tex.sample === 0)
+    return { width: w, height: h, channels: tex.channels,
+             pixels: tex.surfaces[0].subarray(0, w * h * tex.channels) };
+  const v = YAPF.textureToRGBA(tex, 0, 0);
+  return { width: w, height: h, channels: 4, pixels: new Uint8Array(v.rgba.buffer),
+           note: tex.payload === 1 ? 'GPU blocks decoded' : 'converted to 8-bit' };
+}
 async function importFiles(files) {
   const images = [];
   for (const f of files) {
     try {
-      const img = YAPF.decode(new Uint8Array(await f.arrayBuffer()));
+      const img = yapfToPixels(YAPF.decodeTexture(new Uint8Array(await f.arrayBuffer())));
       const png = await PNG.encode(img.pixels, img.width, img.height, img.channels);
       images.push({ name: f.name.replace(/\.yapf$/i, ''), width: img.width, height: img.height, png });
-      status('Decoded ' + f.name + ' (' + img.width + '×' + img.height + ')');
+      status('Decoded ' + f.name + ' (' + img.width + '×' + img.height + (img.note ? ', ' + img.note : '') + ')');
     } catch (e) {
       status(f.name + ': ' + e.message);
     }
