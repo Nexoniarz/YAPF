@@ -129,9 +129,13 @@ for (uint32_t m = 0; m < t->mip_levels; m++) {
 yapf_tex_free(t);
 ```
 
-The language bindings and the JavaScript port speak version 1; the C
-library's v1 functions also read 8-bit version 2 files (2D, cube face 0,
-array layer 0), so plugins built on them open those too.
+Every extension opens version 2 files: GIMP (at full 16-bit / float
+precision, faces and frames as layers), Blender (HDR as float images),
+KDE and Linux thumbnails, VS Code (with face / layer / frame / slice
+pickers), Figma and Photoshop.  The Python binding (`yapf.load_texture`)
+and the JavaScript port (`YAPF.decodeTexture`) read every texture; the
+other bindings wrap the v1 functions, which also read 8-bit version 2
+files (2D, cube face 0, array layer 0).
 
 ---
 
